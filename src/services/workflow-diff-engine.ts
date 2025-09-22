@@ -404,6 +404,7 @@ export class WorkflowDiffEngine {
       notes: operation.node.notes,
       notesInFlow: operation.node.notesInFlow,
       continueOnFail: operation.node.continueOnFail,
+      onError: operation.node.onError,
       retryOnFail: operation.node.retryOnFail,
       maxTries: operation.node.maxTries,
       waitBetweenTries: operation.node.waitBetweenTries,
@@ -452,8 +453,8 @@ export class WorkflowDiffEngine {
     const node = this.findNode(workflow, operation.nodeId, operation.nodeName);
     if (!node) return;
     
-    // Apply changes using dot notation
-    Object.entries(operation.changes).forEach(([path, value]) => {
+    // Apply updates using dot notation
+    Object.entries(operation.updates).forEach(([path, value]) => {
       this.setNestedProperty(node, path, value);
     });
   }
@@ -544,18 +545,18 @@ export class WorkflowDiffEngine {
       type: 'removeConnection',
       source: operation.source,
       target: operation.target,
-      sourceOutput: operation.changes.sourceOutput,
-      targetInput: operation.changes.targetInput
+      sourceOutput: operation.updates.sourceOutput,
+      targetInput: operation.updates.targetInput
     });
     
     this.applyAddConnection(workflow, {
       type: 'addConnection',
       source: operation.source,
       target: operation.target,
-      sourceOutput: operation.changes.sourceOutput,
-      targetInput: operation.changes.targetInput,
-      sourceIndex: operation.changes.sourceIndex,
-      targetIndex: operation.changes.targetIndex
+      sourceOutput: operation.updates.sourceOutput,
+      targetInput: operation.updates.targetInput,
+      sourceIndex: operation.updates.sourceIndex,
+      targetIndex: operation.updates.targetIndex
     });
   }
 

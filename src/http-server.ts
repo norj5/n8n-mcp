@@ -12,28 +12,81 @@ import { logger } from './utils/logger';
 import { PROJECT_VERSION } from './utils/version';
 import { isN8nApiConfigured } from './config/n8n-api';
 import dotenv from 'dotenv';
+import { readFileSync } from 'fs';
+import { getStartupBaseUrl, formatEndpointUrls, detectBaseUrl } from './utils/url-detector';
+import { 
+  negotiateProtocolVersion, 
+  logProtocolNegotiation,
+  N8N_PROTOCOL_VERSION 
+} from './utils/protocol-version';
 
 dotenv.config();
 
 let expressServer: any;
+let authToken: string | null = null;
+
+/**
+ * Load auth token from environment variable or file
+ */
+export function loadAuthToken(): string | null {
+  // First, try AUTH_TOKEN environment variable
+  if (process.env.AUTH_TOKEN) {
+    logger.info('Using AUTH_TOKEN from environment variable');
+    return process.env.AUTH_TOKEN;
+  }
+  
+  // Then, try AUTH_TOKEN_FILE
+  if (process.env.AUTH_TOKEN_FILE) {
+    try {
+      const token = readFileSync(process.env.AUTH_TOKEN_FILE, 'utf-8').trim();
+      logger.info(`Loaded AUTH_TOKEN from file: ${process.env.AUTH_TOKEN_FILE}`);
+      return token;
+    } catch (error) {
+      logger.error(`Failed to read AUTH_TOKEN_FILE: ${process.env.AUTH_TOKEN_FILE}`, error);
+      console.error(`ERROR: Failed to read AUTH_TOKEN_FILE: ${process.env.AUTH_TOKEN_FILE}`);
+      console.error(error instanceof Error ? error.message : 'Unknown error');
+      return null;
+    }
+  }
+  
+  return null;
+}
 
 /**
  * Validate required environment variables
  */
 function validateEnvironment() {
-  const required = ['AUTH_TOKEN'];
-  const missing = required.filter(key => !process.env[key]);
+  // Load auth token from env var or file
+  authToken = loadAuthToken();
   
-  if (missing.length > 0) {
-    logger.error(`Missing required environment variables: ${missing.join(', ')}`);
-    console.error(`ERROR: Missing required environment variables: ${missing.join(', ')}`);
+  if (!authToken || authToken.trim() === '') {
+    logger.error('No authentication token found or token is empty');
+    console.error('ERROR: AUTH_TOKEN is required for HTTP mode and cannot be empty');
+    console.error('Set AUTH_TOKEN environment variable or AUTH_TOKEN_FILE pointing to a file containing the token');
     console.error('Generate AUTH_TOKEN with: openssl rand -base64 32');
     process.exit(1);
   }
   
-  if (process.env.AUTH_TOKEN && process.env.AUTH_TOKEN.length < 32) {
+  // Update authToken to trimmed version
+  authToken = authToken.trim();
+  
+  if (authToken.length < 32) {
     logger.warn('AUTH_TOKEN should be at least 32 characters for security');
     console.warn('WARNING: AUTH_TOKEN should be at least 32 characters for security');
+  }
+  
+  // Check for default token and show prominent warnings
+  if (authToken === 'REPLACE_THIS_AUTH_TOKEN_32_CHARS_MIN_abcdefgh') {
+    logger.warn('⚠️ SECURITY WARNING: Using default AUTH_TOKEN - CHANGE IMMEDIATELY!');
+    logger.warn('Generate secure token with: openssl rand -base64 32');
+    
+    // Only show console warnings in HTTP mode
+    if (process.env.MCP_MODE === 'http') {
+      console.warn('\n⚠️  SECURITY WARNING ⚠️');
+      console.warn('Using default AUTH_TOKEN - CHANGE IMMEDIATELY!');
+      console.warn('Generate secure token: openssl rand -base64 32');
+      console.warn('Update via Railway dashboard environment variables\n');
+    }
   }
 }
 
@@ -64,6 +117,13 @@ export async function startFixedHTTPServer() {
   validateEnvironment();
   
   const app = express();
+  
+  // Configure trust proxy for correct IP logging behind reverse proxies
+  const trustProxy = process.env.TRUST_PROXY ? Number(process.env.TRUST_PROXY) : 0;
+  if (trustProxy > 0) {
+    app.set('trust proxy', trustProxy);
+    logger.info(`Trust proxy enabled with ${trustProxy} hop(s)`);
+  }
   
   // CRITICAL: Don't use any body parser - StreamableHTTPServerTransport needs raw stream
   
@@ -105,6 +165,38 @@ export async function startFixedHTTPServer() {
   const mcpServer = new N8NDocumentationMCPServer();
   logger.info('Created persistent MCP server instance');
 
+  // Root endpoint with API information
+  app.get('/', (req, res) => {
+    const port = parseInt(process.env.PORT || '3000');
+    const host = process.env.HOST || '0.0.0.0';
+    const baseUrl = detectBaseUrl(req, host, port);
+    const endpoints = formatEndpointUrls(baseUrl);
+    
+    res.json({
+      name: 'n8n Documentation MCP Server',
+      version: PROJECT_VERSION,
+      description: 'Model Context Protocol server providing comprehensive n8n node documentation and workflow management',
+      endpoints: {
+        health: {
+          url: endpoints.health,
+          method: 'GET',
+          description: 'Health check and status information'
+        },
+        mcp: {
+          url: endpoints.mcp,
+          method: 'GET/POST',
+          description: 'MCP endpoint - GET for info, POST for JSON-RPC'
+        }
+      },
+      authentication: {
+        type: 'Bearer Token',
+        header: 'Authorization: Bearer <token>',
+        required_for: ['POST /mcp']
+      },
+      documentation: 'https://github.com/czlonkowski/n8n-mcp'
+    });
+  });
+
   // Health check endpoint
   app.get('/health', (req, res) => {
     res.json({ 
@@ -141,20 +233,88 @@ export async function startFixedHTTPServer() {
     }
   });
   
+  // MCP information endpoint (no auth required for discovery)
+  app.get('/mcp', (req, res) => {
+    res.json({
+      description: 'n8n Documentation MCP Server',
+      version: PROJECT_VERSION,
+      endpoints: {
+        mcp: {
+          method: 'POST',
+          path: '/mcp',
+          description: 'Main MCP JSON-RPC endpoint',
+          authentication: 'Bearer token required'
+        },
+        health: {
+          method: 'GET',
+          path: '/health',
+          description: 'Health check endpoint',
+          authentication: 'None'
+        },
+        root: {
+          method: 'GET',
+          path: '/',
+          description: 'API information',
+          authentication: 'None'
+        }
+      },
+      documentation: 'https://github.com/czlonkowski/n8n-mcp'
+    });
+  });
+
   // Main MCP endpoint - handle each request with custom transport handling
   app.post('/mcp', async (req: express.Request, res: express.Response): Promise<void> => {
     const startTime = Date.now();
     
-    // Simple auth check
+    // Enhanced authentication check with specific logging
     const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith('Bearer ') 
-      ? authHeader.slice(7) 
-      : authHeader;
     
-    if (token !== process.env.AUTH_TOKEN) {
-      logger.warn('Authentication failed', { 
+    // Check if Authorization header is missing
+    if (!authHeader) {
+      logger.warn('Authentication failed: Missing Authorization header', { 
         ip: req.ip,
-        userAgent: req.get('user-agent')
+        userAgent: req.get('user-agent'),
+        reason: 'no_auth_header'
+      });
+      res.status(401).json({ 
+        jsonrpc: '2.0',
+        error: {
+          code: -32001,
+          message: 'Unauthorized'
+        },
+        id: null
+      });
+      return;
+    }
+    
+    // Check if Authorization header has Bearer prefix
+    if (!authHeader.startsWith('Bearer ')) {
+      logger.warn('Authentication failed: Invalid Authorization header format (expected Bearer token)', { 
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+        reason: 'invalid_auth_format',
+        headerPrefix: authHeader.substring(0, Math.min(authHeader.length, 10)) + '...'  // Log first 10 chars for debugging
+      });
+      res.status(401).json({ 
+        jsonrpc: '2.0',
+        error: {
+          code: -32001,
+          message: 'Unauthorized'
+        },
+        id: null
+      });
+      return;
+    }
+    
+    // Extract token and trim whitespace
+    const token = authHeader.slice(7).trim();
+    
+    // Check if token matches
+    if (token !== authToken) {
+      logger.warn('Authentication failed: Invalid token', { 
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+        reason: 'invalid_token'
       });
       res.status(401).json({ 
         jsonrpc: '2.0',
@@ -187,10 +347,20 @@ export async function startFixedHTTPServer() {
           
           switch (jsonRpcRequest.method) {
             case 'initialize':
+              // Negotiate protocol version for this client/request
+              const negotiationResult = negotiateProtocolVersion(
+                jsonRpcRequest.params?.protocolVersion,
+                jsonRpcRequest.params?.clientInfo,
+                req.get('user-agent'),
+                req.headers
+              );
+              
+              logProtocolNegotiation(negotiationResult, logger, 'HTTP_SERVER_INITIALIZE');
+              
               response = {
                 jsonrpc: '2.0',
                 result: {
-                  protocolVersion: '2024-11-05',
+                  protocolVersion: negotiationResult.version,
                   capabilities: {
                     tools: {},
                     resources: {}
@@ -335,10 +505,31 @@ export async function startFixedHTTPServer() {
   
   expressServer = app.listen(port, host, () => {
     logger.info(`n8n MCP Fixed HTTP Server started`, { port, host });
+    
+    // Detect the base URL using our utility
+    const baseUrl = getStartupBaseUrl(host, port);
+    const endpoints = formatEndpointUrls(baseUrl);
+    
     console.log(`n8n MCP Fixed HTTP Server running on ${host}:${port}`);
-    console.log(`Health check: http://localhost:${port}/health`);
-    console.log(`MCP endpoint: http://localhost:${port}/mcp`);
+    console.log(`Health check: ${endpoints.health}`);
+    console.log(`MCP endpoint: ${endpoints.mcp}`);
     console.log('\nPress Ctrl+C to stop the server');
+    
+    // Start periodic warning timer if using default token
+    if (authToken === 'REPLACE_THIS_AUTH_TOKEN_32_CHARS_MIN_abcdefgh') {
+      setInterval(() => {
+        logger.warn('⚠️ Still using default AUTH_TOKEN - security risk!');
+        if (process.env.MCP_MODE === 'http') {
+          console.warn('⚠️ REMINDER: Still using default AUTH_TOKEN - please change it!');
+        }
+      }, 300000); // Every 5 minutes
+    }
+    
+    if (process.env.BASE_URL || process.env.PUBLIC_URL) {
+      console.log(`\nPublic URL configured: ${baseUrl}`);
+    } else if (process.env.TRUST_PROXY && Number(process.env.TRUST_PROXY) > 0) {
+      console.log(`\nNote: TRUST_PROXY is enabled. URLs will be auto-detected from proxy headers.`);
+    }
   });
   
   // Handle errors
@@ -380,7 +571,10 @@ declare module './mcp/server' {
 }
 
 // Start if called directly
-if (require.main === module) {
+// Check if this file is being run directly (not imported)
+// In ES modules, we check import.meta.url against process.argv[1]
+// But since we're transpiling to CommonJS, we use the require.main check
+if (typeof require !== 'undefined' && require.main === module) {
   startFixedHTTPServer().catch(error => {
     logger.error('Failed to start Fixed HTTP server:', error);
     console.error('Failed to start Fixed HTTP server:', error);

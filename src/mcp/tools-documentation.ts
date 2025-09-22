@@ -1,439 +1,14 @@
-interface ToolDocumentation {
-  name: string;
-  category: string;
-  essentials: {
-    description: string;
-    keyParameters: string[];
-    example: string;
-    performance: string;
-    tips: string[];
-  };
-  full: {
-    description: string;
-    parameters: Record<string, { type: string; description: string; required?: boolean }>;
-    returns: string;
-    examples: string[];
-    useCases: string[];
-    performance: string;
-    bestPractices: string[];
-    pitfalls: string[];
-    relatedTools: string[];
-  };
-}
-
-export const toolsDocumentation: Record<string, ToolDocumentation> = {
-  search_nodes: {
-    name: 'search_nodes',
-    category: 'discovery',
-    essentials: {
-      description: 'Search for n8n nodes by keyword across names, descriptions, and categories',
-      keyParameters: ['query', 'limit'],
-      example: 'search_nodes({query: "slack", limit: 10})',
-      performance: 'Fast - uses indexed full-text search',
-      tips: [
-        'Uses OR logic - "send slack" finds nodes with ANY of these words',
-        'Single words are more precise than phrases'
-      ]
-    },
-    full: {
-      description: 'Performs full-text search across all n8n nodes using indexed search. Returns nodes matching ANY word in the query (OR logic). Searches through node names, display names, descriptions, and categories.',
-      parameters: {
-        query: { type: 'string', description: 'Search terms (words are ORed together)', required: true },
-        limit: { type: 'number', description: 'Maximum results to return (default: 20)', required: false }
-      },
-      returns: 'Array of nodes with nodeType, displayName, description, category, and relevance score',
-      examples: [
-        'search_nodes({query: "slack"}) - Find all Slack-related nodes',
-        'search_nodes({query: "webhook trigger", limit: 5}) - Find nodes with "webhook" OR "trigger"',
-        'search_nodes({query: "ai"}) - Find AI-related nodes'
-      ],
-      useCases: [
-        'Finding nodes for specific integrations',
-        'Discovering available functionality',
-        'Exploring nodes by keyword when exact name unknown'
-      ],
-      performance: 'Very fast - uses SQLite FTS5 full-text index. Typically <50ms even for complex queries.',
-      bestPractices: [
-        'Use single words for precise matches',
-        'Try different variations if first search fails',
-        'Use list_nodes for browsing by category',
-        'Remember it\'s OR logic, not AND'
-      ],
-      pitfalls: [
-        'Multi-word queries may return too many results',
-        'Doesn\'t search in node properties or operations',
-        'Case-insensitive but doesn\'t handle typos'
-      ],
-      relatedTools: ['list_nodes', 'get_node_essentials', 'get_node_info']
-    }
-  },
-
-  get_node_essentials: {
-    name: 'get_node_essentials',
-    category: 'configuration',
-    essentials: {
-      description: 'Get only the most important 10-20 properties for a node with examples',
-      keyParameters: ['nodeType'],
-      example: 'get_node_essentials("n8n-nodes-base.slack")',
-      performance: 'Very fast - returns <5KB instead of 100KB+',
-      tips: [
-        'Use this instead of get_node_info for 95% of cases',
-        'Includes working examples for common operations'
-      ]
-    },
-    full: {
-      description: 'Returns a curated set of essential properties for a node, typically 10-20 most commonly used properties. Includes working examples and is 95% smaller than get_node_info. Designed for efficient node configuration.',
-      parameters: {
-        nodeType: { type: 'string', description: 'Full node type (e.g., "n8n-nodes-base.slack")', required: true }
-      },
-      returns: 'Object with node info, essential properties, examples, and common patterns',
-      examples: [
-        'get_node_essentials("n8n-nodes-base.httpRequest") - Get HTTP request essentials',
-        'get_node_essentials("n8n-nodes-base.webhook") - Get webhook configuration',
-        'get_node_essentials("n8n-nodes-base.slack") - Get Slack essentials'
-      ],
-      useCases: [
-        'Quickly configuring nodes without information overload',
-        'Getting working examples for immediate use',
-        'Understanding the most important node options',
-        'Building workflows efficiently'
-      ],
-      performance: 'Extremely fast - returns pre-filtered data. Response size <5KB vs 100KB+ for full node info.',
-      bestPractices: [
-        'Always try this before get_node_info',
-        'Use included examples as starting points',
-        'Check commonPatterns for typical configurations',
-        'Combine with validate_node_minimal for quick validation'
-      ],
-      pitfalls: [
-        'May not include rarely-used properties',
-        'Some advanced options might be missing',
-        'Use search_node_properties if specific property not found'
-      ],
-      relatedTools: ['get_node_info', 'search_node_properties', 'validate_node_minimal']
-    }
-  },
-
-  list_nodes: {
-    name: 'list_nodes',
-    category: 'discovery',
-    essentials: {
-      description: 'List all available n8n nodes with optional filtering',
-      keyParameters: ['category', 'limit', 'onlyTriggers'],
-      example: 'list_nodes({category: "communication", limit: 20})',
-      performance: 'Fast - direct database query',
-      tips: [
-        'Great for browsing nodes by category',
-        'Use onlyTriggers:true to find workflow starters'
-      ]
-    },
-    full: {
-      description: 'Lists all available n8n nodes with comprehensive filtering options. Can filter by category, package, trigger status, and more. Returns complete node metadata.',
-      parameters: {
-        category: { type: 'string', description: 'Filter by category (e.g., "communication", "data")', required: false },
-        limit: { type: 'number', description: 'Maximum results (default: 50)', required: false },
-        offset: { type: 'number', description: 'Pagination offset', required: false },
-        onlyTriggers: { type: 'boolean', description: 'Only show trigger nodes', required: false },
-        onlyAITools: { type: 'boolean', description: 'Only show AI-capable nodes', required: false },
-        package: { type: 'string', description: 'Filter by package name', required: false }
-      },
-      returns: 'Array of nodes with complete metadata including type, name, description, category',
-      examples: [
-        'list_nodes() - Get first 50 nodes',
-        'list_nodes({category: "trigger"}) - All trigger nodes',
-        'list_nodes({onlyAITools: true}) - Nodes marked as AI tools',
-        'list_nodes({package: "n8n-nodes-base", limit: 100}) - Core nodes'
-      ],
-      useCases: [
-        'Browsing available nodes by category',
-        'Finding all triggers or webhooks',
-        'Discovering AI-capable nodes',
-        'Getting overview of available integrations'
-      ],
-      performance: 'Fast - uses indexed queries. Returns in <100ms even for large result sets.',
-      bestPractices: [
-        'Use categories for focused browsing',
-        'Combine with search_nodes for keyword search',
-        'Use pagination for large result sets',
-        'Check onlyTriggers for workflow starting points'
-      ],
-      pitfalls: [
-        'No text search - use search_nodes for that',
-        'Categories are predefined, not all nodes have them',
-        'Large result sets without limit can be overwhelming'
-      ],
-      relatedTools: ['search_nodes', 'list_ai_tools', 'get_node_essentials']
-    }
-  },
-
-  validate_node_minimal: {
-    name: 'validate_node_minimal',
-    category: 'validation',
-    essentials: {
-      description: 'Quick validation checking only required fields',
-      keyParameters: ['nodeType', 'config'],
-      example: 'validate_node_minimal("n8n-nodes-base.slack", {resource: "message", operation: "post"})',
-      performance: 'Very fast - minimal checks only',
-      tips: [
-        'Use for quick validation during configuration',
-        'Follow up with validate_node_operation for full validation'
-      ]
-    },
-    full: {
-      description: 'Performs minimal validation checking only required fields. Fastest validation option, perfect for iterative configuration. Checks if all required fields are present without complex dependency validation.',
-      parameters: {
-        nodeType: { type: 'string', description: 'Full node type', required: true },
-        config: { type: 'object', description: 'Node configuration to validate', required: true }
-      },
-      returns: 'Object with isValid boolean, missing required fields, and basic feedback',
-      examples: [
-        'validate_node_minimal("n8n-nodes-base.httpRequest", {url: "https://api.example.com"})',
-        'validate_node_minimal("n8n-nodes-base.slack", {resource: "message", operation: "post", channel: "general"})'
-      ],
-      useCases: [
-        'Quick validation during iterative configuration',
-        'Checking if minimum requirements are met',
-        'Fast feedback loop while building',
-        'Pre-validation before full check'
-      ],
-      performance: 'Extremely fast - only checks required fields. Typically <10ms.',
-      bestPractices: [
-        'Use during configuration for quick feedback',
-        'Follow with validate_node_operation for complete validation',
-        'Great for iterative development',
-        'Combine with get_node_essentials for requirements'
-      ],
-      pitfalls: [
-        'Doesn\'t check field dependencies',
-        'Won\'t catch configuration conflicts',
-        'Missing optional but recommended fields'
-      ],
-      relatedTools: ['validate_node_operation', 'get_node_essentials', 'validate_workflow']
-    }
-  },
-
-  validate_node_operation: {
-    name: 'validate_node_operation',
-    category: 'validation',
-    essentials: {
-      description: 'Full validation with operation-aware checking and helpful suggestions',
-      keyParameters: ['nodeType', 'config', 'profile'],
-      example: 'validate_node_operation("n8n-nodes-base.slack", {resource: "message", operation: "post", channel: "general"})',
-      performance: 'Moderate - comprehensive validation',
-      tips: [
-        'Provides specific error messages and fixes',
-        'Use "strict" profile for production workflows'
-      ]
-    },
-    full: {
-      description: 'Comprehensive validation that understands operation-specific requirements. Checks dependencies, validates field values, and provides helpful suggestions for fixing issues.',
-      parameters: {
-        nodeType: { type: 'string', description: 'Full node type', required: true },
-        config: { type: 'object', description: 'Complete node configuration', required: true },
-        profile: { type: 'string', description: 'Validation profile: "development" or "strict"', required: false }
-      },
-      returns: 'Detailed validation results with errors, warnings, suggestions, and fixes',
-      examples: [
-        'validate_node_operation("n8n-nodes-base.httpRequest", {method: "POST", url: "{{$json.url}}", bodyParametersUi: {...}})',
-        'validate_node_operation("n8n-nodes-base.postgres", {operation: "executeQuery", query: "SELECT * FROM users"}, "strict")'
-      ],
-      useCases: [
-        'Final validation before deployment',
-        'Understanding complex field dependencies',
-        'Getting suggestions for configuration improvements',
-        'Validating operation-specific requirements'
-      ],
-      performance: 'Moderate speed - performs comprehensive checks. 50-200ms depending on complexity.',
-      bestPractices: [
-        'Use after validate_node_minimal passes',
-        'Apply suggested fixes from response',
-        'Use strict profile for production',
-        'Check warnings even if validation passes'
-      ],
-      pitfalls: [
-        'Slower than minimal validation',
-        'May be overkill for simple configurations',
-        'Strict profile might be too restrictive for development'
-      ],
-      relatedTools: ['validate_node_minimal', 'validate_workflow', 'get_property_dependencies']
-    }
-  },
-
-  get_node_for_task: {
-    name: 'get_node_for_task',
-    category: 'templates',
-    essentials: {
-      description: 'Get pre-configured node settings for common tasks',
-      keyParameters: ['task'],
-      example: 'get_node_for_task("send_slack_message")',
-      performance: 'Instant - returns pre-built configurations',
-      tips: [
-        'Use list_tasks() to see all available tasks',
-        'Look for userMustProvide fields to complete'
-      ]
-    },
-    full: {
-      description: 'Returns pre-configured node settings for common automation tasks. Each template includes the correct node type, operation settings, and clear markers for what needs user input.',
-      parameters: {
-        task: { type: 'string', description: 'Task identifier (use list_tasks to see all)', required: true }
-      },
-      returns: 'Complete node configuration with parameters, position, and user guidance',
-      examples: [
-        'get_node_for_task("send_slack_message") - Slack message template',
-        'get_node_for_task("receive_webhook") - Webhook trigger setup',
-        'get_node_for_task("query_database") - Database query template'
-      ],
-      useCases: [
-        'Quickly setting up common automation patterns',
-        'Learning correct node configurations',
-        'Avoiding configuration mistakes',
-        'Rapid workflow prototyping'
-      ],
-      performance: 'Instant - returns static templates. No computation required.',
-      bestPractices: [
-        'Check userMustProvide fields for required inputs',
-        'Use list_tasks() to discover available templates',
-        'Validate with validate_node_minimal after filling in',
-        'Use as starting point, then customize'
-      ],
-      pitfalls: [
-        'Templates are generic - customize for specific needs',
-        'Not all tasks have templates',
-        'Some fields marked userMustProvide are critical'
-      ],
-      relatedTools: ['list_tasks', 'get_node_essentials', 'validate_node_minimal']
-    }
-  },
-
-  n8n_create_workflow: {
-    name: 'n8n_create_workflow',
-    category: 'workflow_management',
-    essentials: {
-      description: 'Create a new workflow in n8n via API',
-      keyParameters: ['name', 'nodes', 'connections'],
-      example: 'n8n_create_workflow({name: "My Workflow", nodes: [...], connections: {...}})',
-      performance: 'API call - depends on n8n instance',
-      tips: [
-        'ALWAYS use node names in connections, never IDs',
-        'Requires N8N_API_URL and N8N_API_KEY configuration'
-      ]
-    },
-    full: {
-      description: 'Creates a new workflow in your n8n instance via API. Requires proper API configuration. Returns the created workflow with assigned ID.',
-      parameters: {
-        name: { type: 'string', description: 'Workflow name', required: true },
-        nodes: { type: 'array', description: 'Array of node configurations', required: true },
-        connections: { type: 'object', description: 'Node connections (use names!)', required: true },
-        settings: { type: 'object', description: 'Workflow settings', required: false },
-        tags: { type: 'array', description: 'Tag IDs (not names)', required: false }
-      },
-      returns: 'Created workflow object with id, name, nodes, connections, and metadata',
-      examples: [
-        `n8n_create_workflow({
-  name: "Slack Notification",
-  nodes: [
-    {id: "1", name: "Webhook", type: "n8n-nodes-base.webhook", position: [250, 300]},
-    {id: "2", name: "Slack", type: "n8n-nodes-base.slack", position: [450, 300], parameters: {...}}
-  ],
-  connections: {
-    "Webhook": {main: [[{node: "Slack", type: "main", index: 0}]]}
-  }
-})`
-      ],
-      useCases: [
-        'Deploying workflows programmatically',
-        'Automating workflow creation',
-        'Migrating workflows between instances',
-        'Creating workflows from templates'
-      ],
-      performance: 'Depends on n8n instance and network. Typically 100-500ms.',
-      bestPractices: [
-        'CRITICAL: Use node NAMES in connections, not IDs',
-        'Validate workflow before creating',
-        'Use meaningful workflow names',
-        'Check n8n_health_check before creating',
-        'Handle API errors gracefully'
-      ],
-      pitfalls: [
-        'Using node IDs in connections breaks UI display',
-        'Workflow not automatically activated',
-        'Tags must exist (use tag IDs not names)',
-        'API must be configured correctly'
-      ],
-      relatedTools: ['validate_workflow', 'n8n_update_partial_workflow', 'n8n_list_workflows']
-    }
-  },
-
-  n8n_update_partial_workflow: {
-    name: 'n8n_update_partial_workflow',
-    category: 'workflow_management',
-    essentials: {
-      description: 'Update workflows using diff operations - only send changes, not entire workflow',
-      keyParameters: ['id', 'operations'],
-      example: 'n8n_update_partial_workflow({id: "123", operations: [{type: "updateNode", nodeId: "Slack", updates: {...}}]})',
-      performance: '80-90% more efficient than full updates',
-      tips: [
-        'Maximum 5 operations per request',
-        'Can reference nodes by name or ID'
-      ]
-    },
-    full: {
-      description: 'Update existing workflows using diff operations. Much more efficient than full updates as it only sends the changes. Supports 13 different operation types.',
-      parameters: {
-        id: { type: 'string', description: 'Workflow ID to update', required: true },
-        operations: { type: 'array', description: 'Array of diff operations (max 5)', required: true },
-        validateOnly: { type: 'boolean', description: 'Only validate without applying', required: false }
-      },
-      returns: 'Updated workflow with applied changes and operation results',
-      examples: [
-        `// Update node parameters
-n8n_update_partial_workflow({
-  id: "123",
-  operations: [{
-    type: "updateNode",
-    nodeId: "Slack",
-    updates: {parameters: {channel: "general"}}
-  }]
-})`,
-        `// Add connection between nodes
-n8n_update_partial_workflow({
-  id: "123",
-  operations: [{
-    type: "addConnection",
-    from: "HTTP Request",
-    to: "Slack",
-    fromOutput: "main",
-    toInput: "main"
-  }]
-})`
-      ],
-      useCases: [
-        'Updating node configurations',
-        'Adding/removing connections',
-        'Enabling/disabling nodes',
-        'Moving nodes in canvas',
-        'Updating workflow metadata'
-      ],
-      performance: 'Very efficient - only sends changes. 80-90% less data than full updates.',
-      bestPractices: [
-        'Batch related operations together',
-        'Use validateOnly:true to test first',
-        'Reference nodes by name for clarity',
-        'Keep under 5 operations per request',
-        'Check operation results for success'
-      ],
-      pitfalls: [
-        'Maximum 5 operations per request',
-        'Some operations have dependencies',
-        'Node must exist for update operations',
-        'Connection nodes must both exist'
-      ],
-      relatedTools: ['n8n_get_workflow', 'n8n_update_full_workflow', 'validate_workflow']
-    }
-  }
-};
+import { toolsDocumentation } from './tool-docs';
 
 export function getToolDocumentation(toolName: string, depth: 'essentials' | 'full' = 'essentials'): string {
+  // Check for special documentation topics
+  if (toolName === 'javascript_code_node_guide') {
+    return getJavaScriptCodeNodeGuide(depth);
+  }
+  if (toolName === 'python_code_node_guide') {
+    return getPythonCodeNodeGuide(depth);
+  }
+  
   const tool = toolsDocumentation[toolName];
   if (!tool) {
     return `Tool '${toolName}' not found. Use tools_documentation() to see available tools.`;
@@ -491,137 +66,119 @@ ${full.relatedTools.map(t => `- ${t}`).join('\n')}`;
 }
 
 export function getToolsOverview(depth: 'essentials' | 'full' = 'essentials'): string {
+  // Get version info from package.json
+  const packageJson = require('../../package.json');
+  const supportedN8nVersion = packageJson.dependencies?.n8n?.replace(/[^0-9.]/g, '') || 'latest';
+  
   if (depth === 'essentials') {
-    return `# n8n MCP Tools Quick Reference
+    return `# n8n MCP Tools Reference
 
-Welcome! Here's how to efficiently work with n8n nodes:
+## Important: Compatibility Notice
+⚠️ This MCP server is tested with n8n version ${supportedN8nVersion}. 
+Inform the user to check their n8n version matches or is compatible with the supported version listed above.
 
-## Essential Workflow
-1. **Find**: search_nodes({query: "slack"})
-2. **Configure**: get_node_essentials("n8n-nodes-base.slack")  
-3. **Validate**: validate_node_minimal() → validate_node_operation()
-4. **Deploy**: n8n_create_workflow() (if API configured)
+## Code Node Configuration
+When working with Code nodes, always start by calling the relevant guide:
+- tools_documentation({topic: "javascript_code_node_guide"}) for JavaScript Code nodes
+- tools_documentation({topic: "python_code_node_guide"}) for Python Code nodes
 
-## Key Tips
-- Always use get_node_essentials instead of get_node_info (95% smaller!)
-- Use node NAMES in connections, never IDs
-- Try get_node_for_task() for common patterns
-- Call validate_node_minimal() for quick checks
+## Standard Workflow Pattern
 
-## Get Help
-- tools_documentation({topic: "search_nodes"}) - Get help for specific tool
-- tools_documentation({topic: "overview", depth: "full"}) - See complete guide
-- list_tasks() - See available task templates
+1. **Find** the node you need:
+   - search_nodes({query: "slack"}) - Search by keyword
+   - list_nodes({category: "communication"}) - List by category
+   - list_ai_tools() - List AI-capable nodes
 
-Available tools: ${Object.keys(toolsDocumentation).join(', ')}`;
-  }
+2. **Configure** the node:
+   - get_node_essentials("nodes-base.slack") - Get essential properties only (5KB)
+   - get_node_info("nodes-base.slack") - Get complete schema (100KB+)
+   - search_node_properties("nodes-base.slack", "auth") - Find specific properties
 
-  // Full overview
-  return `# n8n MCP Tools Complete Guide
-
-## Overview
-The n8n MCP provides 39 tools to help you discover, configure, validate, and deploy n8n workflows. Tools are organized into categories for easy discovery.
+3. **Validate** before deployment:
+   - validate_node_minimal("nodes-base.slack", config) - Check required fields
+   - validate_node_operation("nodes-base.slack", config) - Full validation with fixes
+   - validate_workflow(workflow) - Validate entire workflow
 
 ## Tool Categories
 
-### Discovery Tools
-- **search_nodes**: Find nodes by keyword (uses OR logic)
-- **list_nodes**: Browse nodes by category, package, or type
-- **list_ai_tools**: See all AI-capable nodes (263 available)
+**Discovery Tools**
+- search_nodes - Full-text search across all nodes
+- list_nodes - List nodes with filtering by category, package, or type
+- list_ai_tools - List all AI-capable nodes with usage guidance
 
-### Configuration Tools  
-- **get_node_essentials**: Get key properties only (<5KB vs 100KB+)
-- **get_node_info**: Get complete node details (use sparingly)
-- **search_node_properties**: Find specific properties in large nodes
-- **get_property_dependencies**: Understand field relationships
+**Configuration Tools**
+- get_node_essentials - Returns 10-20 key properties with examples
+- get_node_info - Returns complete node schema with all properties
+- search_node_properties - Search for specific properties within a node
+- get_property_dependencies - Analyze property visibility dependencies
 
-### Validation Tools
-- **validate_node_minimal**: Quick required field check
-- **validate_node_operation**: Full operation-aware validation
-- **validate_workflow**: Complete workflow validation
-- **validate_workflow_connections**: Check node connections
-- **validate_workflow_expressions**: Validate n8n expressions
+**Validation Tools**
+- validate_node_minimal - Quick validation of required fields only
+- validate_node_operation - Full validation with operation awareness
+- validate_workflow - Complete workflow validation including connections
 
-### Task & Template Tools
-- **list_tasks**: See available task templates
-- **get_node_for_task**: Get pre-configured nodes
-- **list_node_templates**: Find workflow templates
-- **search_templates**: Search template library
+**Template Tools**
+- list_tasks - List common task templates
+- get_node_for_task - Get pre-configured node for specific tasks
+- search_templates - Search workflow templates by keyword
+- get_template - Get complete workflow JSON by ID
 
-### Workflow Management (requires API config)
-- **n8n_create_workflow**: Create new workflows
-- **n8n_update_partial_workflow**: Efficient diff-based updates
-- **n8n_update_full_workflow**: Replace entire workflow
-- **n8n_list_workflows**: List workflows with filtering
+**n8n API Tools** (requires N8N_API_URL configuration)
+- n8n_create_workflow - Create new workflows
+- n8n_update_partial_workflow - Update workflows using diff operations
+- n8n_validate_workflow - Validate workflow from n8n instance
+- n8n_trigger_webhook_workflow - Trigger workflow execution
 
-## Recommended Patterns
+## Performance Characteristics
+- Instant (<10ms): search_nodes, list_nodes, get_node_essentials
+- Fast (<100ms): validate_node_minimal, get_node_for_task
+- Moderate (100-500ms): validate_workflow, get_node_info
+- Network-dependent: All n8n_* tools
 
-### Building a Simple Workflow
-\`\`\`javascript
-// 1. Find what you need
-search_nodes({query: "webhook"})
-search_nodes({query: "slack"})
+For comprehensive documentation on any tool:
+tools_documentation({topic: "tool_name", depth: "full"})`;
+  }
 
-// 2. Get configurations
-get_node_essentials("n8n-nodes-base.webhook")
-get_node_essentials("n8n-nodes-base.slack")
+  const categories = getAllCategories();
+  return `# n8n MCP Tools - Complete Reference
 
-// 3. Build and validate
-const workflow = {
-  name: "My Webhook to Slack",
-  nodes: [...],
-  connections: {"Webhook": {main: [[{node: "Slack", type: "main", index: 0}]]}}
-};
-validate_workflow(workflow)
+## Important: Compatibility Notice
+⚠️ This MCP server is tested with n8n version ${supportedN8nVersion}. 
+Run n8n_health_check() to verify your n8n instance compatibility and API connectivity.
 
-// 4. Deploy (if API configured)
-n8n_create_workflow(workflow)
-\`\`\`
+## Code Node Guides
+For Code node configuration, use these comprehensive guides:
+- tools_documentation({topic: "javascript_code_node_guide", depth: "full"}) - JavaScript patterns, n8n variables, error handling
+- tools_documentation({topic: "python_code_node_guide", depth: "full"}) - Python patterns, data access, debugging
 
-### Using AI Tools
-Any node can be an AI tool! Connect it to an AI Agent's ai_tool port:
-\`\`\`javascript
-get_node_as_tool_info("n8n-nodes-base.slack")
-// Returns how to configure Slack as an AI tool
-\`\`\`
+## All Available Tools by Category
 
-### Efficient Updates
-Use partial updates to save 80-90% bandwidth:
-\`\`\`javascript
-n8n_update_partial_workflow({
-  id: "workflow-id",
-  operations: [
-    {type: "updateNode", nodeId: "Slack", updates: {parameters: {channel: "general"}}}
-  ]
-})
-\`\`\`
+${categories.map(cat => {
+  const tools = getToolsByCategory(cat);
+  const categoryName = cat.charAt(0).toUpperCase() + cat.slice(1).replace('_', ' ');
+  return `### ${categoryName}
+${tools.map(toolName => {
+  const tool = toolsDocumentation[toolName];
+  return `- **${toolName}**: ${tool.essentials.description}`;
+}).join('\n')}`;
+}).join('\n\n')}
 
-## Performance Guide
-- **Fastest**: get_node_essentials, validate_node_minimal, list_tasks
-- **Fast**: search_nodes, list_nodes, get_node_for_task  
-- **Moderate**: validate_node_operation, n8n_update_partial_workflow
-- **Slow**: get_node_info (100KB+), validate_workflow (full analysis)
+## Usage Notes
+- All node types require the "nodes-base." or "nodes-langchain." prefix
+- Use get_node_essentials() first for most tasks (95% smaller than get_node_info)
+- Validation profiles: minimal (editing), runtime (default), strict (deployment)
+- n8n API tools only available when N8N_API_URL and N8N_API_KEY are configured
 
-## Common Pitfalls to Avoid
-1. Using get_node_info when get_node_essentials would work
-2. Using node IDs instead of names in connections
-3. Not validating before creating workflows
-4. Searching with long phrases instead of keywords
-5. Forgetting to configure N8N_API_URL for management tools
-
-## Getting More Help
-- Use tools_documentation({topic: "toolname"}) for any tool
-- Check CLAUDE.md for latest updates and examples
-- Run n8n_health_check() to verify API connectivity`;
+For detailed documentation on any tool:
+tools_documentation({topic: "tool_name", depth: "full"})`;
 }
 
-export function searchToolDocumentation(query: string): string[] {
+export function searchToolDocumentation(keyword: string): string[] {
   const results: string[] = [];
-  const searchTerms = query.toLowerCase().split(' ');
   
   for (const [toolName, tool] of Object.entries(toolsDocumentation)) {
-    const searchText = `${toolName} ${tool.essentials.description} ${tool.category}`.toLowerCase();
-    if (searchTerms.some(term => searchText.includes(term))) {
+    const searchText = `${toolName} ${tool.essentials.description} ${tool.full.description}`.toLowerCase();
+    if (searchText.includes(keyword.toLowerCase())) {
       results.push(toolName);
     }
   }
@@ -641,4 +198,489 @@ export function getAllCategories(): string[] {
     categories.add(tool.category);
   });
   return Array.from(categories);
+}
+
+// Special documentation topics
+function getJavaScriptCodeNodeGuide(depth: 'essentials' | 'full' = 'essentials'): string {
+  if (depth === 'essentials') {
+    return `# JavaScript Code Node Guide
+
+Essential patterns for JavaScript in n8n Code nodes.
+
+**Key Concepts**:
+- Access all items: \`$input.all()\` (not items[0])
+- Current item data: \`$json\`
+- Return format: \`[{json: {...}}]\` (array of objects)
+
+**Available Helpers**:
+- \`$helpers.httpRequest()\` - Make HTTP requests
+- \`$jmespath()\` - Query JSON data
+- \`DateTime\` - Luxon for date handling
+
+**Common Patterns**:
+\`\`\`javascript
+// Process all items
+const allItems = $input.all();
+return allItems.map(item => ({
+  json: {
+    processed: true,
+    original: item.json,
+    timestamp: DateTime.now().toISO()
+  }
+}));
+\`\`\`
+
+**Tips**:
+- Webhook data is under \`.body\` property
+- Use async/await for HTTP requests
+- Always return array format
+
+For full guide: tools_documentation({topic: "javascript_code_node_guide", depth: "full"})`;
+  }
+
+  // Full documentation
+  return `# JavaScript Code Node Complete Guide
+
+Comprehensive guide for using JavaScript in n8n Code nodes.
+
+## Data Access Patterns
+
+### Accessing Input Data
+\`\`\`javascript
+// Get all items from previous node
+const allItems = $input.all();
+
+// Get specific node's output
+const webhookData = $node["Webhook"].json;
+
+// Current item in loop
+const currentItem = $json;
+
+// First item only
+const firstItem = $input.first().json;
+\`\`\`
+
+### Webhook Data Structure
+**CRITICAL**: Webhook data is nested under \`.body\`:
+\`\`\`javascript
+// WRONG - Won't work
+const data = $json.name;
+
+// CORRECT - Webhook data is under body
+const data = $json.body.name;
+\`\`\`
+
+## Available Built-in Functions
+
+### HTTP Requests
+\`\`\`javascript
+// Make HTTP request
+const response = await $helpers.httpRequest({
+  method: 'GET',
+  url: 'https://api.example.com/data',
+  headers: {
+    'Authorization': 'Bearer token'
+  }
+});
+\`\`\`
+
+### Date/Time Handling
+\`\`\`javascript
+// Using Luxon DateTime
+const now = DateTime.now();
+const formatted = now.toFormat('yyyy-MM-dd');
+const iso = now.toISO();
+const plus5Days = now.plus({ days: 5 });
+\`\`\`
+
+### JSON Querying
+\`\`\`javascript
+// JMESPath queries
+const result = $jmespath($json, "users[?age > 30].name");
+\`\`\`
+
+## Return Format Requirements
+
+### Correct Format
+\`\`\`javascript
+// MUST return array of objects with json property
+return [{
+  json: {
+    result: "success",
+    data: processedData
+  }
+}];
+
+// Multiple items
+return items.map(item => ({
+  json: {
+    id: item.id,
+    processed: true
+  }
+}));
+\`\`\`
+
+### Binary Data
+\`\`\`javascript
+// Return with binary data
+return [{
+  json: { filename: "report.pdf" },
+  binary: {
+    data: Buffer.from(pdfContent).toString('base64')
+  }
+}];
+\`\`\`
+
+## Common Patterns
+
+### Processing Webhook Data
+\`\`\`javascript
+// Extract webhook payload
+const webhookBody = $json.body;
+const { username, email, items } = webhookBody;
+
+// Process and return
+return [{
+  json: {
+    username,
+    email,
+    itemCount: items.length,
+    processedAt: DateTime.now().toISO()
+  }
+}];
+\`\`\`
+
+### Aggregating Data
+\`\`\`javascript
+// Sum values across all items
+const allItems = $input.all();
+const total = allItems.reduce((sum, item) => {
+  return sum + (item.json.amount || 0);
+}, 0);
+
+return [{
+  json: { 
+    total,
+    itemCount: allItems.length,
+    average: total / allItems.length
+  }
+}];
+\`\`\`
+
+### Error Handling
+\`\`\`javascript
+try {
+  const response = await $helpers.httpRequest({
+    url: 'https://api.example.com/data'
+  });
+  
+  return [{
+    json: {
+      success: true,
+      data: response
+    }
+  }];
+} catch (error) {
+  return [{
+    json: {
+      success: false,
+      error: error.message
+    }
+  }];
+}
+\`\`\`
+
+## Available Node.js Modules
+- crypto (built-in)
+- Buffer
+- URL/URLSearchParams
+- Basic Node.js globals
+
+## Common Pitfalls
+1. Using \`items[0]\` instead of \`$input.all()\`
+2. Forgetting webhook data is under \`.body\`
+3. Returning plain objects instead of \`[{json: {...}}]\`
+4. Using \`require()\` for external modules (not allowed)
+5. Trying to use expression syntax \`{{}}\` inside code
+
+## Best Practices
+1. Always validate input data exists before accessing
+2. Use try-catch for HTTP requests
+3. Return early on validation failures
+4. Keep code simple and readable
+5. Use descriptive variable names
+
+## Related Tools
+- get_node_essentials("nodes-base.code")
+- validate_node_operation()
+- python_code_node_guide (for Python syntax)`;
+}
+
+function getPythonCodeNodeGuide(depth: 'essentials' | 'full' = 'essentials'): string {
+  if (depth === 'essentials') {
+    return `# Python Code Node Guide
+
+Essential patterns for Python in n8n Code nodes.
+
+**Key Concepts**:
+- Access all items: \`_input.all()\` (not items[0])
+- Current item data: \`_json\`
+- Return format: \`[{"json": {...}}]\` (list of dicts)
+
+**Limitations**:
+- No external libraries (no requests, pandas, numpy)
+- Use built-in functions only
+- No pip install available
+
+**Common Patterns**:
+\`\`\`python
+# Process all items
+all_items = _input.all()
+return [{
+    "json": {
+        "processed": True,
+        "count": len(all_items),
+        "first_item": all_items[0]["json"] if all_items else None
+    }
+}]
+\`\`\`
+
+**Tips**:
+- Webhook data is under ["body"] key
+- Use json module for parsing
+- datetime for date handling
+
+For full guide: tools_documentation({topic: "python_code_node_guide", depth: "full"})`;
+  }
+
+  // Full documentation
+  return `# Python Code Node Complete Guide
+
+Comprehensive guide for using Python in n8n Code nodes.
+
+## Data Access Patterns
+
+### Accessing Input Data
+\`\`\`python
+# Get all items from previous node
+all_items = _input.all()
+
+# Get specific node's output (use _node)
+webhook_data = _node["Webhook"]["json"]
+
+# Current item in loop
+current_item = _json
+
+# First item only
+first_item = _input.first()["json"]
+\`\`\`
+
+### Webhook Data Structure
+**CRITICAL**: Webhook data is nested under ["body"]:
+\`\`\`python
+# WRONG - Won't work
+data = _json["name"]
+
+# CORRECT - Webhook data is under body
+data = _json["body"]["name"]
+\`\`\`
+
+## Available Built-in Modules
+
+### Standard Library Only
+\`\`\`python
+import json
+import datetime
+import base64
+import hashlib
+import urllib.parse
+import re
+import math
+import random
+\`\`\`
+
+### Date/Time Handling
+\`\`\`python
+from datetime import datetime, timedelta
+
+# Current time
+now = datetime.now()
+iso_format = now.isoformat()
+
+# Date arithmetic
+future = now + timedelta(days=5)
+formatted = now.strftime("%Y-%m-%d")
+\`\`\`
+
+### JSON Operations
+\`\`\`python
+# Parse JSON string
+data = json.loads(json_string)
+
+# Convert to JSON
+json_output = json.dumps({"key": "value"})
+\`\`\`
+
+## Return Format Requirements
+
+### Correct Format
+\`\`\`python
+# MUST return list of dictionaries with "json" key
+return [{
+    "json": {
+        "result": "success",
+        "data": processed_data
+    }
+}]
+
+# Multiple items
+return [
+    {"json": {"id": item["json"]["id"], "processed": True}}
+    for item in all_items
+]
+\`\`\`
+
+### Binary Data
+\`\`\`python
+# Return with binary data
+import base64
+
+return [{
+    "json": {"filename": "report.pdf"},
+    "binary": {
+        "data": base64.b64encode(pdf_content).decode()
+    }
+}]
+\`\`\`
+
+## Common Patterns
+
+### Processing Webhook Data
+\`\`\`python
+# Extract webhook payload
+webhook_body = _json["body"]
+username = webhook_body.get("username")
+email = webhook_body.get("email")
+items = webhook_body.get("items", [])
+
+# Process and return
+return [{
+    "json": {
+        "username": username,
+        "email": email,
+        "item_count": len(items),
+        "processed_at": datetime.now().isoformat()
+    }
+}]
+\`\`\`
+
+### Aggregating Data
+\`\`\`python
+# Sum values across all items
+all_items = _input.all()
+total = sum(item["json"].get("amount", 0) for item in all_items)
+
+return [{
+    "json": {
+        "total": total,
+        "item_count": len(all_items),
+        "average": total / len(all_items) if all_items else 0
+    }
+}]
+\`\`\`
+
+### Error Handling
+\`\`\`python
+try:
+    # Process data
+    webhook_data = _json["body"]
+    result = process_data(webhook_data)
+    
+    return [{
+        "json": {
+            "success": True,
+            "data": result
+        }
+    }]
+except Exception as e:
+    return [{
+        "json": {
+            "success": False,
+            "error": str(e)
+        }
+    }]
+\`\`\`
+
+### Data Transformation
+\`\`\`python
+# Transform all items
+all_items = _input.all()
+transformed = []
+
+for item in all_items:
+    data = item["json"]
+    transformed.append({
+        "json": {
+            "id": data.get("id"),
+            "name": data.get("name", "").upper(),
+            "timestamp": datetime.now().isoformat(),
+            "valid": bool(data.get("email"))
+        }
+    })
+
+return transformed
+\`\`\`
+
+## Limitations & Workarounds
+
+### No External Libraries
+\`\`\`python
+# CANNOT USE:
+# import requests  # Not available
+# import pandas   # Not available
+# import numpy    # Not available
+
+# WORKAROUND: Use JavaScript Code node for HTTP requests
+# Or use HTTP Request node before Code node
+\`\`\`
+
+### HTTP Requests Alternative
+Since Python requests library is not available, use:
+1. JavaScript Code node with $helpers.httpRequest()
+2. HTTP Request node before your Python Code node
+3. Webhook node to receive data
+
+## Common Pitfalls
+1. Trying to import external libraries (requests, pandas)
+2. Using items[0] instead of _input.all()
+3. Forgetting webhook data is under ["body"]
+4. Returning dictionaries instead of [{"json": {...}}]
+5. Not handling missing keys with .get()
+
+## Best Practices
+1. Always use .get() for dictionary access
+2. Validate data before processing
+3. Handle empty input arrays
+4. Use list comprehensions for transformations
+5. Return meaningful error messages
+
+## Type Conversions
+\`\`\`python
+# String to number
+value = float(_json.get("amount", "0"))
+
+# Boolean conversion
+is_active = str(_json.get("active", "")).lower() == "true"
+
+# Safe JSON parsing
+try:
+    data = json.loads(_json.get("json_string", "{}"))
+except json.JSONDecodeError:
+    data = {}
+\`\`\`
+
+## Related Tools
+- get_node_essentials("nodes-base.code")
+- validate_node_operation()
+- javascript_code_node_guide (for JavaScript syntax)`;
 }

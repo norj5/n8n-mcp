@@ -2,8 +2,13 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![GitHub stars](https://img.shields.io/github/stars/czlonkowski/n8n-mcp?style=social)](https://github.com/czlonkowski/n8n-mcp)
-[![Version](https://img.shields.io/badge/version-2.7.4-blue.svg)](https://github.com/czlonkowski/n8n-mcp)
+[![Version](https://img.shields.io/badge/version-2.12.0-blue.svg)](https://github.com/czlonkowski/n8n-mcp)
+[![npm version](https://img.shields.io/npm/v/n8n-mcp.svg)](https://www.npmjs.com/package/n8n-mcp)
+[![codecov](https://codecov.io/gh/czlonkowski/n8n-mcp/graph/badge.svg?token=YOUR_TOKEN)](https://codecov.io/gh/czlonkowski/n8n-mcp)
+[![Tests](https://img.shields.io/badge/tests-1728%20passing-brightgreen.svg)](https://github.com/czlonkowski/n8n-mcp/actions)
+[![n8n version](https://img.shields.io/badge/n8n-^1.111.0-orange.svg)](https://github.com/n8n-io/n8n)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fczlonkowski%2Fn8n--mcp-green.svg)](https://github.com/czlonkowski/n8n-mcp/pkgs/container/n8n-mcp)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/n8n-mcp?referralCode=n8n-mcp)
 
 A Model Context Protocol (MCP) server that provides AI assistants with comprehensive access to n8n node documentation, properties, and operations. Deploy in minutes to give Claude and other AI assistants deep knowledge about n8n's 525+ workflow automation nodes.
 
@@ -11,18 +16,86 @@ A Model Context Protocol (MCP) server that provides AI assistants with comprehen
 
 n8n-MCP serves as a bridge between n8n's workflow automation platform and AI models, enabling them to understand and work with n8n nodes effectively. It provides structured access to:
 
-- 📚 **525 n8n nodes** from both n8n-nodes-base and @n8n/n8n-nodes-langchain
+- 📚 **535 n8n nodes** from both n8n-nodes-base and @n8n/n8n-nodes-langchain
 - 🔧 **Node properties** - 99% coverage with detailed schemas
 - ⚡ **Node operations** - 63.6% coverage of available actions
 - 📄 **Documentation** - 90% coverage from official n8n docs (including AI nodes)
 - 🤖 **AI tools** - 263 AI-capable nodes detected with full documentation
 
 
+## ⚠️ Important Safety Warning
+
+**NEVER edit your production workflows directly with AI!** Always:
+- 🔄 **Make a copy** of your workflow before using AI tools
+- 🧪 **Test in development** environment first
+- 💾 **Export backups** of important workflows
+- ⚡ **Validate changes** before deploying to production
+
+AI results can be unpredictable. Protect your work!
+
 ## 🚀 Quick Start
 
 Get n8n-MCP running in 5 minutes:
 
-### Option 1: Docker (Easiest) 🚀
+[![n8n-mcp Video Quickstart Guide](./thumbnail.png)](https://youtu.be/5CccjiLLyaY?si=Z62SBGlw9G34IQnQ&t=343)
+
+### Option 1: npx (Fastest - No Installation!) 🚀
+
+**Prerequisites:** [Node.js](https://nodejs.org/) installed on your system
+
+```bash
+# Run directly with npx (no installation needed!)
+npx n8n-mcp
+```
+
+Add to Claude Desktop config:
+
+**Basic configuration (documentation tools only):**
+```json
+{
+  "mcpServers": {
+    "n8n-mcp": {
+      "command": "npx",
+      "args": ["n8n-mcp"],
+      "env": {
+        "MCP_MODE": "stdio",
+        "LOG_LEVEL": "error",
+        "DISABLE_CONSOLE_OUTPUT": "true"
+      }
+    }
+  }
+}
+```
+
+**Full configuration (with n8n management tools):**
+```json
+{
+  "mcpServers": {
+    "n8n-mcp": {
+      "command": "npx",
+      "args": ["n8n-mcp"],
+      "env": {
+        "MCP_MODE": "stdio",
+        "LOG_LEVEL": "error",
+        "DISABLE_CONSOLE_OUTPUT": "true",
+        "N8N_API_URL": "https://your-n8n-instance.com",
+        "N8N_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+> **Note**: npx will download and run the latest version automatically. The package includes a pre-built database with all n8n node information.
+
+**Configuration file locations:**
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux**: `~/.config/Claude/claude_desktop_config.json`
+
+**Restart Claude Desktop after updating configuration** - That's it! 🎉
+
+### Option 2: Docker (Easy & Isolated) 🐳
 
 **Prerequisites:** Docker installed on your system
 
@@ -90,6 +163,7 @@ Add to Claude Desktop config:
         "run",
         "-i",
         "--rm",
+        "--init",
         "-e", "MCP_MODE=stdio",
         "-e", "LOG_LEVEL=error",
         "-e", "DISABLE_CONSOLE_OUTPUT=true",
@@ -110,6 +184,7 @@ Add to Claude Desktop config:
         "run",
         "-i",
         "--rm",
+        "--init",
         "-e", "MCP_MODE=stdio",
         "-e", "LOG_LEVEL=error",
         "-e", "DISABLE_CONSOLE_OUTPUT=true",
@@ -122,9 +197,13 @@ Add to Claude Desktop config:
 }
 ```
 
+>💡 Tip: If you’re running n8n locally on the same machine (e.g., via Docker), use http://host.docker.internal:5678 as the N8N_API_URL.
+
 > **Note**: The n8n API credentials are optional. Without them, you'll have access to all documentation and validation tools. With them, you'll additionally get workflow management capabilities (create, update, execute workflows).
 
 **Important:** The `-i` flag is required for MCP stdio communication.
+
+> 🔧 If you encounter any issues with Docker, check our [Docker Troubleshooting Guide](./docs/DOCKER_TROUBLESHOOTING.md).
 
 **Configuration file locations:**
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -133,7 +212,27 @@ Add to Claude Desktop config:
 
 **Restart Claude Desktop after updating configuration** - That's it! 🎉
 
-### Option 2: Local Installation
+## 💖 Support This Project
+
+<div align="center">
+  <a href="https://github.com/sponsors/czlonkowski">
+    <img src="https://img.shields.io/badge/Sponsor-❤️-db61a2?style=for-the-badge&logo=github-sponsors" alt="Sponsor n8n-mcp" />
+  </a>
+</div>
+
+**n8n-mcp** started as a personal tool but now helps tens of thousands of developers automate their workflows efficiently. Maintaining and developing this project competes with my paid work.
+
+Your sponsorship helps me:
+- 🚀 Dedicate focused time to new features
+- 🐛 Respond quickly to issues
+- 📚 Keep documentation up-to-date
+- 🔄 Ensure compatibility with latest n8n releases
+
+Every sponsorship directly translates to hours invested in making n8n-mcp better for everyone. **[Become a sponsor →](https://github.com/sponsors/czlonkowski)**
+
+---
+
+### Option 3: Local Installation (For Development)
 
 **Prerequisites:** [Node.js](https://nodejs.org/) installed on your system
 
@@ -189,6 +288,64 @@ Add to Claude Desktop config:
 
 > **Note**: The n8n API credentials can be configured either in a `.env` file (create from `.env.example`) or directly in the Claude config as shown above.
 
+> 💡 Tip: If you’re running n8n locally on the same machine (e.g., via Docker), use http://host.docker.internal:5678 as the N8N_API_URL.
+
+### Option 4: Railway Cloud Deployment (One-Click Deploy) ☁️
+
+**Prerequisites:** Railway account (free tier available)
+
+Deploy n8n-MCP to Railway's cloud platform with zero configuration:
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/n8n-mcp?referralCode=n8n-mcp)
+
+**Benefits:**
+- ☁️ **Instant cloud hosting** - No server setup required
+- 🔒 **Secure by default** - HTTPS included, auth token warnings
+- 🌐 **Global access** - Connect from any Claude Desktop
+- ⚡ **Auto-scaling** - Railway handles the infrastructure
+- 📊 **Built-in monitoring** - Logs and metrics included
+
+**Quick Setup:**
+1. Click the "Deploy on Railway" button above
+2. Sign in to Railway (or create a free account)
+3. Configure your deployment (project name, region)
+4. Click "Deploy" and wait ~2-3 minutes
+5. Copy your deployment URL and auth token
+6. Add to Claude Desktop config using the HTTPS URL
+
+> 📚 **For detailed setup instructions, troubleshooting, and configuration examples, see our [Railway Deployment Guide](./docs/RAILWAY_DEPLOYMENT.md)**
+
+**Configuration file locations:**
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux**: `~/.config/Claude/claude_desktop_config.json`
+
+**Restart Claude Desktop after updating configuration** - That's it! 🎉
+
+## 🔧 n8n Integration
+
+Want to use n8n-MCP with your n8n instance? Check out our comprehensive [n8n Deployment Guide](./docs/N8N_DEPLOYMENT.md) for:
+- Local testing with the MCP Client Tool node
+- Production deployment with Docker Compose
+- Cloud deployment on Hetzner, AWS, and other providers
+- Troubleshooting and security best practices
+
+## 💻 Connect your IDE
+
+n8n-MCP works with multiple AI-powered IDEs and tools. Choose your preferred development environment:
+
+### [Claude Code](./docs/CLAUDE_CODE_SETUP.md)
+Quick setup for Claude Code CLI - just type "add this mcp server" and paste the config.
+
+### [Visual Studio Code](./docs/VS_CODE_PROJECT_SETUP.md)
+Full setup guide for VS Code with GitHub Copilot integration and MCP support.
+
+### [Cursor](./docs/CURSOR_SETUP.md)
+Step-by-step tutorial for connecting n8n-MCP to Cursor IDE with custom rules.
+
+### [Windsurf](./docs/WINDSURF_SETUP.md)
+Complete guide for integrating n8n-MCP with Windsurf using project rules.
+
 ## 🤖 Claude Project Setup
 
 For the best results when using n8n-MCP with Claude Projects, use these enhanced system instructions:
@@ -198,38 +355,57 @@ You are an expert in n8n automation software using n8n-MCP tools. Your role is t
 
 ## Core Workflow Process
 
-1. **ALWAYS start with**: `tools_documentation()` to understand best practices and available tools.
+1. **ALWAYS start new conversation with**: `tools_documentation()` to understand best practices and available tools.
 
-2. **Discovery Phase** - Find the right nodes:
+2. **Template Discovery Phase** 
+   - `search_templates_by_metadata({complexity: "simple"})` - Find skill-appropriate templates
+   - `get_templates_for_task('webhook_processing')` - Get curated templates by task
+   - `search_templates('slack notification')` - Text search for specific needs
+   - `list_node_templates(['n8n-nodes-base.slack'])` - Find templates using specific nodes
+   
+   **Template filtering strategies**:
+   - **For beginners**: `complexity: "simple"` and `maxSetupMinutes: 30`
+   - **By role**: `targetAudience: "marketers"` or `"developers"` or `"analysts"`
+   - **By time**: `maxSetupMinutes: 15` for quick wins
+   - **By service**: `requiredService: "openai"` to find compatible templates
+
+3. **Discovery Phase** - Find the right nodes (if no suitable template):
+   - Think deeply about user request and the logic you are going to build to fulfill it. Ask follow-up questions to clarify the user's intent, if something is unclear. Then, proceed with the rest of your instructions.
    - `search_nodes({query: 'keyword'})` - Search by functionality
    - `list_nodes({category: 'trigger'})` - Browse by category
    - `list_ai_tools()` - See AI-capable nodes (remember: ANY node can be an AI tool!)
 
-3. **Configuration Phase** - Get node details efficiently:
+4. **Configuration Phase** - Get node details efficiently:
    - `get_node_essentials(nodeType)` - Start here! Only 10-20 essential properties
    - `search_node_properties(nodeType, 'auth')` - Find specific properties
    - `get_node_for_task('send_email')` - Get pre-configured templates
    - `get_node_documentation(nodeType)` - Human-readable docs when needed
+   - It is good common practice to show a visual representation of the workflow architecture to the user and asking for opinion, before moving forward. 
 
-4. **Pre-Validation Phase** - Validate BEFORE building:
+5. **Pre-Validation Phase** - Validate BEFORE building:
    - `validate_node_minimal(nodeType, config)` - Quick required fields check
    - `validate_node_operation(nodeType, config, profile)` - Full operation-aware validation
    - Fix any validation errors before proceeding
 
-5. **Building Phase** - Create the workflow:
-   - Use validated configurations from step 4
+6. **Building Phase** - Create or customize the workflow:
+   - If using template: `get_template(templateId, {mode: "full"})`
+   - **MANDATORY ATTRIBUTION**: When using a template, ALWAYS inform the user:
+     - "This workflow is based on a template by **[author.name]** (@[author.username])"
+     - "View the original template at: [url]"
+     - Example: "This workflow is based on a template by **David Ashby** (@cfomodz). View the original at: https://n8n.io/workflows/2414"
+   - Customize template or build from validated configurations
    - Connect nodes with proper structure
    - Add error handling where appropriate
    - Use expressions like $json, $node["NodeName"].json
-   - Build the workflow in an artifact (unless the user asked to create in n8n instance)
+   - Build the workflow in an artifact for easy editing downstream (unless the user asked to create in n8n instance)
 
-6. **Workflow Validation Phase** - Validate complete workflow:
+7. **Workflow Validation Phase** - Validate complete workflow:
    - `validate_workflow(workflow)` - Complete validation including connections
    - `validate_workflow_connections(workflow)` - Check structure and AI tool connections
    - `validate_workflow_expressions(workflow)` - Validate all n8n expressions
    - Fix any issues found before deployment
 
-7. **Deployment Phase** (if n8n API configured):
+8. **Deployment Phase** (if n8n API configured):
    - `n8n_create_workflow(workflow)` - Deploy validated workflow
    - `n8n_validate_workflow({id: 'workflow-id'})` - Post-deployment validation
    - `n8n_update_partial_workflow()` - Make incremental updates using diffs
@@ -237,7 +413,11 @@ You are an expert in n8n automation software using n8n-MCP tools. Your role is t
 
 ## Key Insights
 
-- **VALIDATE EARLY AND OFTEN** - Catch errors before they reach production
+- **TEMPLATES FIRST** - Always check for existing templates before building from scratch (2,500+ available!)
+- **ATTRIBUTION REQUIRED** - Always credit template authors with name, username, and link to n8n.io
+- **SMART FILTERING** - Use metadata filters to find templates matching user skill level and time constraints
+- **USE CODE NODE ONLY WHEN IT IS NECESSARY** - always prefer to use standard nodes over code node. Use code node only when you are sure you need it.
+- **VALIDATE EARLY AND OFTEN** - Catch errors before they reach deployment
 - **USE DIFF UPDATES** - Use n8n_update_partial_workflow for 80-90% token savings
 - **ANY node can be an AI tool** - not just those with usableAsTool=true
 - **Pre-validate configurations** - Use validate_node_minimal before building
@@ -274,27 +454,50 @@ You are an expert in n8n automation software using n8n-MCP tools. Your role is t
 
 ## Example Workflow
 
-### 1. Discovery & Configuration
+### Smart Template-First Approach
+
+#### 1. Find existing templates
+// Find simple Slack templates for marketers
+const templates = search_templates_by_metadata({
+  requiredService: 'slack',
+  complexity: 'simple',
+  targetAudience: 'marketers',
+  maxSetupMinutes: 30
+})
+
+// Or search by text
+search_templates('slack notification')
+
+// Or get curated templates
+get_templates_for_task('slack_integration')
+
+#### 2. Use and customize template
+const workflow = get_template(templates.items[0].id, {mode: 'full'})
+validate_workflow(workflow)
+
+### Building from Scratch (if no suitable template)
+
+#### 1. Discovery & Configuration
 search_nodes({query: 'slack'})
 get_node_essentials('n8n-nodes-base.slack')
 
-### 2. Pre-Validation
+#### 2. Pre-Validation
 validate_node_minimal('n8n-nodes-base.slack', {resource:'message', operation:'send'})
 validate_node_operation('n8n-nodes-base.slack', fullConfig, 'runtime')
 
-### 3. Build Workflow
+#### 3. Build Workflow
 // Create workflow JSON with validated configs
 
-### 4. Workflow Validation
+#### 4. Workflow Validation
 validate_workflow(workflowJson)
 validate_workflow_connections(workflowJson)
 validate_workflow_expressions(workflowJson)
 
-### 5. Deploy (if configured)
+#### 5. Deploy (if configured)
 n8n_create_workflow(validatedWorkflow)
 n8n_validate_workflow({id: createdWorkflowId})
 
-### 6. Update Using Diffs
+#### 6. Update Using Diffs
 n8n_update_partial_workflow({
   workflowId: id,
   operations: [
@@ -304,15 +507,35 @@ n8n_update_partial_workflow({
 
 ## Important Rules
 
-- ALWAYS validate before building
-- ALWAYS validate after building
-- NEVER deploy unvalidated workflows
+- ALWAYS check for existing templates before building from scratch
+- LEVERAGE metadata filters to find skill-appropriate templates
+- **ALWAYS ATTRIBUTE TEMPLATES**: When using any template, you MUST share the author's name, username, and link to the original template on n8n.io
+- VALIDATE templates before deployment (they may need updates)
 - USE diff operations for updates (80-90% token savings)
 - STATE validation results clearly
 - FIX all errors before proceeding
+
+## Template Discovery Tips
+
+- **97.5% of templates have metadata** - Use smart filtering!
+- **Filter combinations work best** - Combine complexity + setup time + service
+- **Templates save 70-90% development time** - Always check first
+- **Metadata is AI-generated** - Occasionally imprecise but highly useful
+- **Use `includeMetadata: false` for fast browsing** - Add metadata only when needed
 ```
 
-Save these instructions in your Claude Project for optimal n8n workflow assistance with comprehensive validation.
+Save these instructions in your Claude Project for optimal n8n workflow assistance with intelligent template discovery.
+
+## 🚨 Important: Sharing Guidelines
+
+This project is MIT licensed and free for everyone to use. However:
+
+- **✅ DO**: Share this repository freely with proper attribution
+- **✅ DO**: Include a direct link to https://github.com/czlonkowski/n8n-mcp in your first post/video
+- **❌ DON'T**: Gate this free tool behind engagement requirements (likes, follows, comments)
+- **❌ DON'T**: Use this project for engagement farming on social media
+
+This tool was created to benefit everyone in the n8n community without friction. Please respect the MIT license spirit by keeping it accessible to all.
 
 ## Features
 
@@ -352,6 +575,14 @@ Once connected, Claude can use these powerful tools:
 - **`search_node_properties`** - Find specific properties within nodes
 - **`list_ai_tools`** - List all AI-capable nodes (ANY node can be used as AI tool!)
 - **`get_node_as_tool_info`** - Get guidance on using any node as an AI tool
+
+### Template Tools
+- **`list_templates`** - Browse all templates with descriptions and optional metadata (2,500+ templates)
+- **`search_templates`** - Text search across template names and descriptions
+- **`search_templates_by_metadata`** - Advanced filtering by complexity, setup time, services, audience
+- **`list_node_templates`** - Find templates using specific nodes
+- **`get_template`** - Get complete workflow JSON for import
+- **`get_templates_for_task`** - Curated templates for common automation tasks
 
 ### Advanced Tools
 - **`get_node_for_task`** - Pre-configured node settings for common tasks
@@ -480,6 +711,7 @@ npm run dev:http       # HTTP dev mode
 - [Validation System](./docs/validation-improvements-v2.4.2.md) - Smart validation profiles
 
 ### Development & Deployment
+- [Railway Deployment](./docs/RAILWAY_DEPLOYMENT.md) - One-click cloud deployment guide
 - [HTTP Deployment](./docs/HTTP_DEPLOYMENT.md) - Remote server setup guide
 - [Dependency Management](./docs/DEPENDENCY_UPDATES.md) - Keeping n8n packages in sync
 - [Claude's Interview](./docs/CLAUDE_INTERVIEW.md) - Real-world impact of n8n-MCP
@@ -491,56 +723,105 @@ npm run dev:http       # HTTP dev mode
 
 ## 📊 Metrics & Coverage
 
-Current database coverage (n8n v1.99.1):
+Current database coverage (n8n v1.106.3):
 
-- ✅ **525/525** nodes loaded (100%)
-- ✅ **520** nodes with properties (99%)
-- ✅ **470** nodes with documentation (90%)
-- ✅ **263** AI-capable tools detected
+- ✅ **535/535** nodes loaded (100%)
+- ✅ **528** nodes with properties (98.7%)
+- ✅ **470** nodes with documentation (88%)
+- ✅ **267** AI-capable tools detected
 - ✅ **AI Agent & LangChain nodes** fully documented
 - ⚡ **Average response time**: ~12ms
 - 💾 **Database size**: ~15MB (optimized)
 
 ## 🔄 Recent Updates
 
-### v2.7.4 - Self-Documenting MCP Tools
-- ✅ **RENAMED**: `start_here_workflow_guide` → `tools_documentation` for clarity
-- ✅ **NEW**: Depth parameter - Control documentation detail with "essentials" or "full"
-- ✅ **NEW**: Per-tool documentation - Get help for any specific MCP tool by name
-- ✅ **CONCISE**: Essential info by default, comprehensive docs on demand
-- ✅ **LLM-FRIENDLY**: Plain text format instead of JSON for better readability
-- ✅ **QUICK HELP**: Call without parameters for immediate quick reference
-- ✅ **8 TOOLS DOCUMENTED**: Complete documentation for most commonly used tools
+See [CHANGELOG.md](./docs/CHANGELOG.md) for full version history and recent changes.
 
-### v2.7.0 - Diff-Based Workflow Editing with Transactional Updates
-- ✅ **NEW**: `n8n_update_partial_workflow` tool - Update workflows using diff operations
-- ✅ **RENAMED**: `n8n_update_workflow` → `n8n_update_full_workflow` for clarity
-- ✅ **80-90% TOKEN SAVINGS**: Only send changes, not entire workflow JSON
-- ✅ **13 OPERATIONS**: addNode, removeNode, updateNode, moveNode, enable/disable, connections, settings, tags
-- ✅ **TRANSACTIONAL**: Two-pass processing allows adding nodes and connections in any order
-- ✅ **5 OPERATION LIMIT**: Ensures reliability and atomic updates
-- ✅ **VALIDATION MODE**: Test changes with `validateOnly: true` before applying
-- ✅ **IMPROVED DOCS**: Comprehensive parameter documentation and examples
+## ⚠️ Known Issues
 
-### v2.6.3 - n8n Instance Workflow Validation
-- ✅ **NEW**: `n8n_validate_workflow` tool - Validate workflows directly from n8n instance by ID
-- ✅ **FETCHES**: Retrieves workflow from n8n API and runs comprehensive validation
-- ✅ **CONSISTENT**: Uses same WorkflowValidator for reliability
-- ✅ **FLEXIBLE**: Supports all validation profiles and options
-- ✅ **INTEGRATED**: Part of complete workflow lifecycle management
-- ✅ **SIMPLE**: AI agents need only workflow ID, no JSON required
+### Claude Desktop Container Management
 
-### v2.6.2 - Enhanced Workflow Creation Validation
-- ✅ **NEW**: Node type validation - Verifies node types actually exist in n8n
-- ✅ **FIXED**: Critical issue with `nodes-base.webhook` validation - now caught before database lookup
-- ✅ **NEW**: Smart suggestions for common mistakes (e.g., `webhook` → `n8n-nodes-base.webhook`)
-- ✅ **NEW**: Minimum viable workflow validation - Prevents single-node workflows (except webhooks)
-- ✅ **NEW**: Empty connection detection - Catches multi-node workflows with no connections
-- ✅ **ENHANCED**: Error messages with clear guidance and examples
-- ✅ **PREVENTS**: Broken workflows that show as question marks in n8n UI
+#### Container Accumulation (Fixed in v2.7.20+)
+Previous versions had an issue where containers would not properly clean up when Claude Desktop sessions ended. This has been fixed in v2.7.20+ with proper signal handling.
+
+**For best container lifecycle management:**
+1. **Use the --init flag** (recommended) - Docker's init system ensures proper signal handling:
+```json
+{
+  "mcpServers": {
+    "n8n-mcp": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm", "--init",
+        "ghcr.io/czlonkowski/n8n-mcp:latest"
+      ]
+    }
+  }
+}
+```
+
+2. **Ensure you're using v2.7.20 or later** - Check your version:
+```bash
+docker run --rm ghcr.io/czlonkowski/n8n-mcp:latest --version
+```
 
 
-See [CHANGELOG.md](./docs/CHANGELOG.md) for full version history.
+## 🧪 Testing
+
+The project includes a comprehensive test suite with **1,356 tests** ensuring code quality and reliability:
+
+```bash
+# Run all tests
+npm test
+
+# Run tests with coverage report
+npm run test:coverage
+
+# Run tests in watch mode
+npm run test:watch
+
+# Run specific test suites
+npm run test:unit           # 933 unit tests
+npm run test:integration    # 249 integration tests
+npm run test:bench          # Performance benchmarks
+```
+
+### Test Suite Overview
+
+- **Total Tests**: 1,356 (100% passing)
+  - **Unit Tests**: 1,107 tests across 44 files
+  - **Integration Tests**: 249 tests across 14 files
+- **Execution Time**: ~2.5 minutes in CI
+- **Test Framework**: Vitest (for speed and TypeScript support)
+- **Mocking**: MSW for API mocking, custom mocks for databases
+
+### Coverage & Quality
+
+- **Coverage Reports**: Generated in `./coverage` directory
+- **CI/CD**: Automated testing on all PRs with GitHub Actions
+- **Performance**: Environment-aware thresholds for CI vs local
+- **Parallel Execution**: Configurable thread pool for faster runs
+
+### Testing Architecture
+
+- **Unit Tests**: Isolated component testing with mocks
+  - Services layer: ~450 tests
+  - Parsers: ~200 tests
+  - Database repositories: ~100 tests
+  - MCP tools: ~180 tests
+
+- **Integration Tests**: Full system behavior validation
+  - MCP Protocol compliance: 72 tests
+  - Database operations: 89 tests
+  - Error handling: 44 tests
+  - Performance: 44 tests
+
+- **Benchmarks**: Performance testing for critical paths
+  - Database queries
+  - Node loading
+  - Search operations
+
+For detailed testing documentation, see [Testing Architecture](./docs/testing-architecture.md).
 
 ## 📦 License
 
@@ -560,11 +841,48 @@ Contributions are welcome! Please:
 3. Run tests (`npm test`)
 4. Submit a pull request
 
+### 🚀 For Maintainers: Automated Releases
+
+This project uses automated releases triggered by version changes:
+
+```bash
+# Guided release preparation
+npm run prepare:release
+
+# Test release automation
+npm run test:release-automation
+```
+
+The system automatically handles:
+- 🏷️ GitHub releases with changelog content
+- 📦 NPM package publishing
+- 🐳 Multi-platform Docker images
+- 📚 Documentation updates
+
+See [Automated Release Guide](./docs/AUTOMATED_RELEASES.md) for complete details.
+
 ## 👏 Acknowledgments
 
 - [n8n](https://n8n.io) team for the workflow automation platform
 - [Anthropic](https://anthropic.com) for the Model Context Protocol
 - All contributors and users of this project
+
+### Template Attribution
+
+All workflow templates in this project are fetched from n8n's public template gallery at [n8n.io/workflows](https://n8n.io/workflows). Each template includes:
+- Full attribution to the original creator (name and username)
+- Direct link to the source template on n8n.io
+- Original workflow ID for reference
+
+The AI agent instructions in this project contain mandatory attribution requirements. When using any template, the AI will automatically:
+- Share the template author's name and username
+- Provide a direct link to the original template on n8n.io
+- Display attribution in the format: "This workflow is based on a template by **[author]** (@[username]). View the original at: [url]"
+
+Template creators retain all rights to their workflows. This project indexes templates to improve discoverability through AI assistants. If you're a template creator and have concerns about your template being indexed, please open an issue.
+
+Special thanks to the prolific template contributors whose work helps thousands of users automate their workflows, including:
+**David Ashby** (@cfomodz), **Yaron Been** (@yaron-nofluff), **Jimleuk** (@jimleuk), **Davide** (@n3witalia), **David Olusola** (@dae221), **Ranjan Dailata** (@ranjancse), **Airtop** (@cesar-at-airtop), **Joseph LePage** (@joe), **Don Jayamaha Jr** (@don-the-gem-dealer), **Angel Menendez** (@djangelic), and the entire n8n community of creators!
 
 ---
 

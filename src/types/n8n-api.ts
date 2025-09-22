@@ -9,11 +9,12 @@ export interface WorkflowNode {
   typeVersion: number;
   position: [number, number];
   parameters: Record<string, unknown>;
-  credentials?: Record<string, string>;
+  credentials?: Record<string, unknown>;
   disabled?: boolean;
   notes?: string;
   notesInFlow?: boolean;
   continueOnFail?: boolean;
+  onError?: 'continueRegularOutput' | 'continueErrorOutput' | 'stopWorkflow';
   retryOnFail?: boolean;
   maxTries?: number;
   waitBetweenTries?: number;
@@ -48,6 +49,7 @@ export interface Workflow {
   nodes: WorkflowNode[];
   connections: WorkflowConnection;
   active?: boolean; // Optional for creation as it's read-only
+  isArchived?: boolean; // Optional, available in newer n8n versions
   settings?: WorkflowSettings;
   staticData?: Record<string, unknown>;
   tags?: string[];

@@ -59,10 +59,45 @@ docker run -d \
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
 | `MCP_MODE` | Server mode: `stdio` or `http` | `stdio` | No |
-| `AUTH_TOKEN` | Bearer token for HTTP authentication | - | Yes (HTTP mode) |
+| `AUTH_TOKEN` | Bearer token for HTTP authentication | - | Yes (HTTP mode)* |
+| `AUTH_TOKEN_FILE` | Path to file containing auth token (v2.7.5+) | - | Yes (HTTP mode)* |
 | `PORT` | HTTP server port | `3000` | No |
 | `NODE_ENV` | Environment: `development` or `production` | `production` | No |
 | `LOG_LEVEL` | Logging level: `debug`, `info`, `warn`, `error` | `info` | No |
+| `NODE_DB_PATH` | Custom database path (v2.7.16+) | `/app/data/nodes.db` | No |
+
+*Either `AUTH_TOKEN` or `AUTH_TOKEN_FILE` must be set for HTTP mode. If both are set, `AUTH_TOKEN` takes precedence.
+
+### Configuration File Support (v2.8.2+)
+
+You can mount a JSON configuration file to set environment variables:
+
+```bash
+# Create config file
+cat > config.json << EOF
+{
+  "MCP_MODE": "http",
+  "AUTH_TOKEN": "your-secure-token",
+  "LOG_LEVEL": "info",
+  "N8N_API_URL": "https://your-n8n-instance.com",
+  "N8N_API_KEY": "your-api-key"
+}
+EOF
+
+# Run with config file
+docker run -d \
+  --name n8n-mcp \
+  -v $(pwd)/config.json:/app/config.json:ro \
+  -p 3000:3000 \
+  ghcr.io/czlonkowski/n8n-mcp:latest
+```
+
+The config file supports:
+- All standard environment variables
+- Nested objects (flattened with underscore separators)
+- Arrays, booleans, numbers, and strings
+- Secure handling with command injection prevention
+- Dangerous variable blocking for security
 
 ### Docker Compose Configuration
 
@@ -132,10 +167,23 @@ For local Claude Desktop integration without HTTP:
 
 ```bash
 # Run in stdio mode (interactive)
-docker run --rm -i \
+docker run --rm -i --init \
   -e MCP_MODE=stdio \
   -v n8n-mcp-data:/app/data \
   ghcr.io/czlonkowski/n8n-mcp:latest
+```
+
+### Server Mode (Command Line)
+
+You can also use the `serve` command to start in HTTP mode:
+
+```bash
+# Using the serve command (v2.8.2+)
+docker run -d \
+  --name n8n-mcp \
+  -e AUTH_TOKEN=your-secure-token \
+  -p 3000:3000 \
+  ghcr.io/czlonkowski/n8n-mcp:latest serve
 ```
 
 Configure Claude Desktop:
@@ -148,6 +196,7 @@ Configure Claude Desktop:
         "run",
         "--rm",
         "-i",
+        "--init",
         "-e", "MCP_MODE=stdio",
         "-v", "n8n-mcp-data:/app/data",
         "ghcr.io/czlonkowski/n8n-mcp:latest"
@@ -238,17 +287,39 @@ docker inspect n8n-mcp | jq '.[0].State.Health'
 
 ### Authentication
 
-- Always use a strong AUTH_TOKEN (minimum 32 characters)
-- Never commit tokens to version control
-- Rotate tokens regularly
+n8n-MCP supports two authentication methods for HTTP mode:
+
+#### Method 1: AUTH_TOKEN (Environment Variable)
+- Set the token directly as an environment variable
+- Simple and straightforward for basic deployments
+- Always use a strong token (minimum 32 characters)
 
 ```bash
 # Generate secure token
 openssl rand -base64 32
 
-# Or use uuidgen
-uuidgen | tr -d '-' | base64
+# Use in Docker
+docker run -e AUTH_TOKEN=your-secure-token ...
 ```
+
+#### Method 2: AUTH_TOKEN_FILE (File Path) - NEW in v2.7.5
+- Read token from a file (Docker secrets compatible)
+- More secure for production deployments
+- Prevents token exposure in process lists
+
+```bash
+# Create token file
+echo "your-secure-token" > /path/to/token.txt
+
+# Use with Docker secrets
+docker run -e AUTH_TOKEN_FILE=/run/secrets/auth_token ...
+```
+
+#### Best Practices
+- Never commit tokens to version control
+- Rotate tokens regularly
+- Use AUTH_TOKEN_FILE with Docker secrets for production
+- Ensure token files have restricted permissions (600)
 
 ### Network Security
 
@@ -316,6 +387,28 @@ docker run --rm \
   -v $(pwd):/backup:ro \
   alpine tar xzf /backup/n8n-mcp-backup.tar.gz -C /target
 ```
+
+### Custom Database Path (v2.7.16+)
+
+You can specify a custom database location using `NODE_DB_PATH`:
+
+```bash
+# Use custom path within mounted volume
+docker run -d \
+  --name n8n-mcp \
+  -e MCP_MODE=http \
+  -e AUTH_TOKEN=your-token \
+  -e NODE_DB_PATH=/app/data/custom/my-nodes.db \
+  -v n8n-mcp-data:/app/data \
+  -p 3000:3000 \
+  ghcr.io/czlonkowski/n8n-mcp:latest
+```
+
+**Important Notes:**
+- The path must end with `.db`
+- For data persistence, ensure the path is within a mounted volume
+- Paths outside mounted volumes will be lost on container restart
+- The directory will be created automatically if it doesn't exist
 
 ## 🐛 Troubleshooting
 
@@ -433,7 +526,7 @@ secrets:
 
 ### Image Details
 
-- Base: `node:20-alpine`
+- Base: `node:22-alpine`
 - Size: ~280MB compressed
 - Features: Pre-built database with all node information
 - Database: Complete SQLite with 525+ nodes
@@ -481,4 +574,4 @@ services:
 
 ---
 
-*Last updated: June 2025 - Docker implementation v1.0*
+*Last updated: July 2025 - Docker implementation v1.1*

@@ -16,14 +16,19 @@ export interface ParsedNode {
   isVersioned: boolean;
   packageName: string;
   documentation?: string;
+  outputs?: any[];
+  outputNames?: string[];
 }
 
 export class NodeParser {
   private propertyExtractor = new PropertyExtractor();
+  private currentNodeClass: any = null;
   
   parse(nodeClass: any, packageName: string): ParsedNode {
+    this.currentNodeClass = nodeClass;
     // Get base description (handles versioned nodes)
     const description = this.getNodeDescription(nodeClass);
+    const outputInfo = this.extractOutputs(description);
     
     return {
       style: this.detectStyle(nodeClass),
@@ -39,7 +44,9 @@ export class NodeParser {
       operations: this.propertyExtractor.extractOperations(nodeClass),
       version: this.extractVersion(nodeClass),
       isVersioned: this.detectVersioned(nodeClass),
-      packageName: packageName
+      packageName: packageName,
+      outputs: outputInfo.outputs,
+      outputNames: outputInfo.outputNames
     };
   }
   
@@ -107,6 +114,14 @@ export class NodeParser {
   }
   
   private detectTrigger(description: any): boolean {
+    // Primary check: group includes 'trigger'
+    if (description.group && Array.isArray(description.group)) {
+      if (description.group.includes('trigger')) {
+        return true;
+      }
+    }
+    
+    // Fallback checks for edge cases
     return description.polling === true || 
            description.trigger === true ||
            description.eventTrigger === true ||
@@ -120,20 +135,14 @@ export class NodeParser {
   }
   
   private extractVersion(nodeClass: any): string {
-    // Handle VersionedNodeType with defaultVersion
-    if (nodeClass.baseDescription?.defaultVersion) {
-      return nodeClass.baseDescription.defaultVersion.toString();
-    }
-    
-    // Handle VersionedNodeType with nodeVersions
-    if (nodeClass.nodeVersions) {
-      const versions = Object.keys(nodeClass.nodeVersions);
-      return Math.max(...versions.map(Number)).toString();
-    }
-    
-    // Check instance for nodeVersions and version arrays
+    // Check instance for baseDescription first
     try {
       const instance = typeof nodeClass === 'function' ? new nodeClass() : nodeClass;
+      
+      // Handle instance-level baseDescription
+      if (instance?.baseDescription?.defaultVersion) {
+        return instance.baseDescription.defaultVersion.toString();
+      }
       
       // Handle instance-level nodeVersions
       if (instance?.nodeVersions) {
@@ -154,7 +163,18 @@ export class NodeParser {
       }
     } catch (e) {
       // Some nodes might require parameters to instantiate
-      // Try to get version from class-level description
+      // Try class-level properties
+    }
+    
+    // Handle class-level VersionedNodeType with defaultVersion
+    if (nodeClass.baseDescription?.defaultVersion) {
+      return nodeClass.baseDescription.defaultVersion.toString();
+    }
+    
+    // Handle class-level VersionedNodeType with nodeVersions
+    if (nodeClass.nodeVersions) {
+      const versions = Object.keys(nodeClass.nodeVersions);
+      return Math.max(...versions.map(Number)).toString();
     }
     
     // Also check class-level description for version array
@@ -173,14 +193,14 @@ export class NodeParser {
   }
   
   private detectVersioned(nodeClass: any): boolean {
-    // Check class-level nodeVersions
-    if (nodeClass.nodeVersions || nodeClass.baseDescription?.defaultVersion) {
-      return true;
-    }
-    
-    // Check instance-level nodeVersions and version arrays
+    // Check instance-level properties first
     try {
       const instance = typeof nodeClass === 'function' ? new nodeClass() : nodeClass;
+      
+      // Check for instance baseDescription with defaultVersion
+      if (instance?.baseDescription?.defaultVersion) {
+        return true;
+      }
       
       // Check for nodeVersions
       if (instance?.nodeVersions) {
@@ -193,7 +213,12 @@ export class NodeParser {
       }
     } catch (e) {
       // Some nodes might require parameters to instantiate
-      // Try to check class-level description
+      // Try class-level checks
+    }
+    
+    // Check class-level nodeVersions
+    if (nodeClass.nodeVersions || nodeClass.baseDescription?.defaultVersion) {
+      return true;
     }
     
     // Also check class-level description for version array
@@ -203,5 +228,52 @@ export class NodeParser {
     }
     
     return false;
+  }
+
+  private extractOutputs(description: any): { outputs?: any[], outputNames?: string[] } {
+    const result: { outputs?: any[], outputNames?: string[] } = {};
+    
+    // First check the base description
+    if (description.outputs) {
+      result.outputs = Array.isArray(description.outputs) ? description.outputs : [description.outputs];
+    }
+    
+    if (description.outputNames) {
+      result.outputNames = Array.isArray(description.outputNames) ? description.outputNames : [description.outputNames];
+    }
+    
+    // If no outputs found and this is a versioned node, check the latest version
+    if (!result.outputs && !result.outputNames) {
+      const nodeClass = this.currentNodeClass; // We'll need to track this
+      if (nodeClass) {
+        try {
+          const instance = new nodeClass();
+          if (instance.nodeVersions) {
+            // Get the latest version
+            const versions = Object.keys(instance.nodeVersions).map(Number);
+            const latestVersion = Math.max(...versions);
+            const versionedDescription = instance.nodeVersions[latestVersion]?.description;
+            
+            if (versionedDescription) {
+              if (versionedDescription.outputs) {
+                result.outputs = Array.isArray(versionedDescription.outputs) 
+                  ? versionedDescription.outputs 
+                  : [versionedDescription.outputs];
+              }
+              
+              if (versionedDescription.outputNames) {
+                result.outputNames = Array.isArray(versionedDescription.outputNames) 
+                  ? versionedDescription.outputNames 
+                  : [versionedDescription.outputNames];
+              }
+            }
+          }
+        } catch (e) {
+          // Ignore errors from instantiating node
+        }
+      }
+    }
+    
+    return result;
   }
 }

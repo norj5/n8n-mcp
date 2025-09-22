@@ -7,7 +7,7 @@
 
 import { ConfigValidator, ValidationResult, ValidationError, ValidationWarning } from './config-validator';
 import { NodeSpecificValidators, NodeValidationContext } from './node-specific-validators';
-import { ExampleGenerator } from './example-generator';
+import { FixedCollectionValidator } from '../utils/fixed-collection-validator';
 
 export type ValidationMode = 'full' | 'operation' | 'minimal';
 export type ValidationProfile = 'strict' | 'runtime' | 'ai-friendly' | 'minimal';
@@ -45,6 +45,19 @@ export class EnhancedConfigValidator extends ConfigValidator {
     mode: ValidationMode = 'operation',
     profile: ValidationProfile = 'ai-friendly'
   ): EnhancedValidationResult {
+    // Input validation - ensure parameters are valid
+    if (typeof nodeType !== 'string') {
+      throw new Error(`Invalid nodeType: expected string, got ${typeof nodeType}`);
+    }
+    
+    if (!config || typeof config !== 'object') {
+      throw new Error(`Invalid config: expected object, got ${typeof config}`);
+    }
+    
+    if (!Array.isArray(properties)) {
+      throw new Error(`Invalid properties: expected array, got ${typeof properties}`);
+    }
+    
     // Extract operation context from config
     const operationContext = this.extractOperationContext(config);
     
@@ -66,7 +79,11 @@ export class EnhancedConfigValidator extends ConfigValidator {
       profile,
       operation: operationContext,
       examples: [],
-      nextSteps: []
+      nextSteps: [],
+      // Ensure arrays are initialized (in case baseResult doesn't have them)
+      errors: baseResult.errors || [],
+      warnings: baseResult.warnings || [],
+      suggestions: baseResult.suggestions || []
     };
     
     // Apply profile-based filtering
@@ -78,13 +95,13 @@ export class EnhancedConfigValidator extends ConfigValidator {
     // Deduplicate errors
     enhancedResult.errors = this.deduplicateErrors(enhancedResult.errors);
     
-    // Add examples from ExampleGenerator if there are errors
-    if (enhancedResult.errors.length > 0) {
-      this.addExamplesFromGenerator(nodeType, enhancedResult);
-    }
+    // Examples removed - use validate_node_operation for configuration guidance
     
     // Generate next steps based on errors
     enhancedResult.nextSteps = this.generateNextSteps(enhancedResult);
+    
+    // Recalculate validity after all enhancements (crucial for fixedCollection validation)
+    enhancedResult.valid = enhancedResult.errors.length === 0;
     
     return enhancedResult;
   }
@@ -186,6 +203,20 @@ export class EnhancedConfigValidator extends ConfigValidator {
     config: Record<string, any>,
     result: EnhancedValidationResult
   ): void {
+    // Type safety check - this should never happen with proper validation
+    if (typeof nodeType !== 'string') {
+      result.errors.push({
+        type: 'invalid_type',
+        property: 'nodeType',
+        message: `Invalid nodeType: expected string, got ${typeof nodeType}`,
+        fix: 'Provide a valid node type string (e.g., "nodes-base.webhook")'
+      });
+      return;
+    }
+    
+    // First, validate fixedCollection properties for known problematic nodes
+    this.validateFixedCollectionStructures(nodeType, config, result);
+    
     // Create context for node-specific validators
     const context: NodeValidationContext = {
       config,
@@ -195,8 +226,11 @@ export class EnhancedConfigValidator extends ConfigValidator {
       autofix: result.autofix || {}
     };
     
+    // Normalize node type (handle both 'n8n-nodes-base.x' and 'nodes-base.x' formats)
+    const normalizedNodeType = nodeType.replace('n8n-nodes-base.', 'nodes-base.');
+    
     // Use node-specific validators
-    switch (nodeType) {
+    switch (normalizedNodeType) {
       case 'nodes-base.slack':
         NodeSpecificValidators.validateSlack(context);
         this.enhanceSlackValidation(config, result);
@@ -213,7 +247,7 @@ export class EnhancedConfigValidator extends ConfigValidator {
         break;
         
       case 'nodes-base.code':
-        // Code node uses base validation which includes syntax checks
+        NodeSpecificValidators.validateCode(context);
         break;
         
       case 'nodes-base.openAi':
@@ -235,6 +269,21 @@ export class EnhancedConfigValidator extends ConfigValidator {
       case 'nodes-base.mysql':
         NodeSpecificValidators.validateMySQL(context);
         break;
+        
+      case 'nodes-base.switch':
+        this.validateSwitchNodeStructure(config, result);
+        break;
+        
+      case 'nodes-base.if':
+        this.validateIfNodeStructure(config, result);
+        break;
+        
+      case 'nodes-base.filter':
+        this.validateFilterNodeStructure(config, result);
+        break;
+        
+      // Additional nodes handled by FixedCollectionValidator
+      // No need for specific validators as the generic utility handles them
     }
     
     // Update autofix if changes were made
@@ -253,16 +302,7 @@ export class EnhancedConfigValidator extends ConfigValidator {
     const { resource, operation } = result.operation || {};
     
     if (resource === 'message' && operation === 'send') {
-      // Add example for sending a message
-      result.examples?.push({
-        description: 'Send a simple text message to a channel',
-        config: {
-          resource: 'message',
-          operation: 'send',
-          channel: '#general',
-          text: 'Hello from n8n!'
-        }
-      });
+      // Examples removed - validation focuses on error detection
       
       // Check for common issues
       if (!config.channel && !config.channelId) {
@@ -274,15 +314,6 @@ export class EnhancedConfigValidator extends ConfigValidator {
           channelError.fix = 'Add channel: "#general" or use a channel ID like "C1234567890"';
         }
       }
-    } else if (resource === 'user' && operation === 'get') {
-      result.examples?.push({
-        description: 'Get user information by email',
-        config: {
-          resource: 'user',
-          operation: 'get',
-          user: 'user@example.com'
-        }
-      });
     }
   }
   
@@ -296,17 +327,7 @@ export class EnhancedConfigValidator extends ConfigValidator {
     const { operation } = result.operation || {};
     
     if (operation === 'append') {
-      result.examples?.push({
-        description: 'Append data to a spreadsheet',
-        config: {
-          operation: 'append',
-          sheetId: '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms',
-          range: 'Sheet1!A:B',
-          options: {
-            valueInputMode: 'USER_ENTERED'
-          }
-        }
-      });
+      // Examples removed - validation focuses on configuration correctness
       
       // Validate range format
       if (config.range && !config.range.includes('!')) {
@@ -327,33 +348,7 @@ export class EnhancedConfigValidator extends ConfigValidator {
     config: Record<string, any>,
     result: EnhancedValidationResult
   ): void {
-    // Add common examples based on method
-    if (config.method === 'GET') {
-      result.examples?.push({
-        description: 'GET request with query parameters',
-        config: {
-          method: 'GET',
-          url: 'https://api.example.com/users',
-          queryParameters: {
-            parameters: [
-              { name: 'page', value: '1' },
-              { name: 'limit', value: '10' }
-            ]
-          }
-        }
-      });
-    } else if (config.method === 'POST') {
-      result.examples?.push({
-        description: 'POST request with JSON body',
-        config: {
-          method: 'POST',
-          url: 'https://api.example.com/users',
-          sendBody: true,
-          bodyContentType: 'json',
-          jsonBody: JSON.stringify({ name: 'John Doe', email: 'john@example.com' })
-        }
-      });
-    }
+    // Examples removed - validation provides error messages and fixes instead
   }
   
   /**
@@ -383,56 +378,13 @@ export class EnhancedConfigValidator extends ConfigValidator {
       steps.push('Consider addressing warnings for better reliability');
     }
     
-    if (result.examples && result.examples.length > 0 && result.errors.length > 0) {
-      steps.push('See examples above for working configurations');
+    if (result.errors.length > 0) {
+      steps.push('Fix the errors above following the provided suggestions');
     }
     
     return steps;
   }
   
-  /**
-   * Add examples from ExampleGenerator to help fix validation errors
-   */
-  private static addExamplesFromGenerator(
-    nodeType: string,
-    result: EnhancedValidationResult
-  ): void {
-    const examples = ExampleGenerator.getExamples(nodeType);
-    
-    if (!examples) {
-      return;
-    }
-    
-    // Add minimal example if there are missing required fields
-    if (result.errors.some(e => e.type === 'missing_required')) {
-      result.examples?.push({
-        description: 'Minimal working configuration',
-        config: examples.minimal
-      });
-    }
-    
-    // Add common example if available
-    if (examples.common) {
-      // Check if the common example matches the operation context
-      const { operation } = result.operation || {};
-      const commonOp = examples.common.operation || examples.common.action;
-      
-      if (!operation || operation === commonOp) {
-        result.examples?.push({
-          description: 'Common configuration pattern',
-          config: examples.common
-        });
-      }
-    }
-    
-    // Add advanced example for complex validation errors
-    if (examples.advanced && result.errors.length > 2) {
-      result.examples?.push({
-        description: 'Advanced configuration with all options',
-        config: examples.advanced
-      });
-    }
-  }
   
   /**
    * Deduplicate errors based on property and type
@@ -491,9 +443,11 @@ export class EnhancedConfigValidator extends ConfigValidator {
       case 'strict':
         // Keep everything, add more suggestions
         if (result.warnings.length === 0 && result.errors.length === 0) {
-          result.suggestions.push('Consider adding error handling and timeout configuration');
+          result.suggestions.push('Consider adding error handling with onError property and timeout configuration');
           result.suggestions.push('Add authentication if connecting to external services');
         }
+        // Require error handling for external service nodes
+        this.enforceErrorHandlingForProfile(result, profile);
         break;
         
       case 'ai-friendly':
@@ -503,7 +457,189 @@ export class EnhancedConfigValidator extends ConfigValidator {
         result.warnings = result.warnings.filter(w => 
           w.type !== 'inefficient' || !w.property?.startsWith('_')
         );
+        // Add error handling suggestions for AI-friendly profile
+        this.addErrorHandlingSuggestions(result);
         break;
     }
+  }
+  
+  /**
+   * Enforce error handling requirements based on profile
+   */
+  private static enforceErrorHandlingForProfile(
+    result: EnhancedValidationResult,
+    profile: ValidationProfile
+  ): void {
+    // Only enforce for strict profile on external service nodes
+    if (profile !== 'strict') return;
+    
+    const nodeType = result.operation?.resource || '';
+    const errorProneTypes = ['httpRequest', 'webhook', 'database', 'api', 'slack', 'email', 'openai'];
+    
+    if (errorProneTypes.some(type => nodeType.toLowerCase().includes(type))) {
+      // Add general warning for strict profile
+      // The actual error handling validation is done in node-specific validators
+      result.warnings.push({
+        type: 'best_practice',
+        property: 'errorHandling',
+        message: 'External service nodes should have error handling configured',
+        suggestion: 'Add onError: "continueRegularOutput" or "stopWorkflow" with retryOnFail: true for resilience'
+      });
+    }
+  }
+  
+  /**
+   * Add error handling suggestions for AI-friendly profile
+   */
+  private static addErrorHandlingSuggestions(
+    result: EnhancedValidationResult
+  ): void {
+    // Check if there are any network/API related errors
+    const hasNetworkErrors = result.errors.some(e => 
+      e.message.toLowerCase().includes('url') || 
+      e.message.toLowerCase().includes('endpoint') ||
+      e.message.toLowerCase().includes('api')
+    );
+    
+    if (hasNetworkErrors) {
+      result.suggestions.push(
+        'For API calls, consider adding onError: "continueRegularOutput" with retryOnFail: true and maxTries: 3'
+      );
+    }
+    
+    // Check for webhook configurations
+    const isWebhook = result.operation?.resource === 'webhook' || 
+                     result.errors.some(e => e.message.toLowerCase().includes('webhook'));
+    
+    if (isWebhook) {
+      result.suggestions.push(
+        'Webhooks should use onError: "continueRegularOutput" to ensure responses are always sent'
+      );
+    }
+  }
+  
+  /**
+   * Validate fixedCollection structures for known problematic nodes
+   * This prevents the "propertyValues[itemName] is not iterable" error
+   */
+  private static validateFixedCollectionStructures(
+    nodeType: string,
+    config: Record<string, any>,
+    result: EnhancedValidationResult
+  ): void {
+    // Use the generic FixedCollectionValidator
+    const validationResult = FixedCollectionValidator.validate(nodeType, config);
+    
+    if (!validationResult.isValid) {
+      // Add errors to the result
+      for (const error of validationResult.errors) {
+        result.errors.push({
+          type: 'invalid_value',
+          property: error.pattern.split('.')[0], // Get the root property
+          message: error.message,
+          fix: error.fix
+        });
+      }
+      
+      // Apply autofix if available
+      if (validationResult.autofix) {
+        // For nodes like If/Filter where the entire config might be replaced,
+        // we need to handle it specially
+        if (typeof validationResult.autofix === 'object' && !Array.isArray(validationResult.autofix)) {
+          result.autofix = {
+            ...result.autofix,
+            ...validationResult.autofix
+          };
+        } else {
+          // If the autofix is an array (like for If/Filter nodes), wrap it properly
+          const firstError = validationResult.errors[0];
+          if (firstError) {
+            const rootProperty = firstError.pattern.split('.')[0];
+            result.autofix = {
+              ...result.autofix,
+              [rootProperty]: validationResult.autofix
+            };
+          }
+        }
+      }
+    }
+  }
+  
+  
+  /**
+   * Validate Switch node structure specifically
+   */
+  private static validateSwitchNodeStructure(
+    config: Record<string, any>,
+    result: EnhancedValidationResult
+  ): void {
+    if (!config.rules) return;
+    
+    // Skip if already caught by validateFixedCollectionStructures
+    const hasFixedCollectionError = result.errors.some(e => 
+      e.property === 'rules' && e.message.includes('propertyValues[itemName] is not iterable')
+    );
+    
+    if (hasFixedCollectionError) return;
+    
+    // Validate rules.values structure if present
+    if (config.rules.values && Array.isArray(config.rules.values)) {
+      config.rules.values.forEach((rule: any, index: number) => {
+        if (!rule.conditions) {
+          result.warnings.push({
+            type: 'missing_common',
+            property: 'rules',
+            message: `Switch rule ${index + 1} is missing "conditions" property`,
+            suggestion: 'Each rule in the values array should have a "conditions" property'
+          });
+        }
+        if (!rule.outputKey && rule.renameOutput !== false) {
+          result.warnings.push({
+            type: 'missing_common',
+            property: 'rules',
+            message: `Switch rule ${index + 1} is missing "outputKey" property`,
+            suggestion: 'Add "outputKey" to specify which output to use when this rule matches'
+          });
+        }
+      });
+    }
+  }
+  
+  /**
+   * Validate If node structure specifically
+   */
+  private static validateIfNodeStructure(
+    config: Record<string, any>,
+    result: EnhancedValidationResult
+  ): void {
+    if (!config.conditions) return;
+    
+    // Skip if already caught by validateFixedCollectionStructures
+    const hasFixedCollectionError = result.errors.some(e => 
+      e.property === 'conditions' && e.message.includes('propertyValues[itemName] is not iterable')
+    );
+    
+    if (hasFixedCollectionError) return;
+    
+    // Add any If-node-specific validation here in the future
+  }
+  
+  /**
+   * Validate Filter node structure specifically
+   */
+  private static validateFilterNodeStructure(
+    config: Record<string, any>,
+    result: EnhancedValidationResult
+  ): void {
+    if (!config.conditions) return;
+    
+    // Skip if already caught by validateFixedCollectionStructures
+    const hasFixedCollectionError = result.errors.some(e => 
+      e.property === 'conditions' && e.message.includes('propertyValues[itemName] is not iterable')
+    );
+    
+    if (hasFixedCollectionError) return;
+    
+    // Add any Filter-node-specific validation here in the future
   }
 }

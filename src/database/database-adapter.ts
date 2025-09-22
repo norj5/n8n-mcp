@@ -13,6 +13,7 @@ export interface DatabaseAdapter {
   pragma(key: string, value?: any): any;
   readonly inTransaction: boolean;
   transaction<T>(fn: () => T): T;
+  checkFTS5Support(): boolean;
 }
 
 export interface PreparedStatement {
@@ -116,14 +117,53 @@ async function createBetterSQLiteAdapter(dbPath: string): Promise<DatabaseAdapte
  * Create sql.js adapter with persistence
  */
 async function createSQLJSAdapter(dbPath: string): Promise<DatabaseAdapter> {
-  const initSqlJs = require('sql.js');
+  let initSqlJs;
+  try {
+    initSqlJs = require('sql.js');
+  } catch (error) {
+    logger.error('Failed to load sql.js module:', error);
+    throw new Error('sql.js module not found. This might be an issue with npm package installation.');
+  }
   
   // Initialize sql.js
   const SQL = await initSqlJs({
     // This will look for the wasm file in node_modules
     locateFile: (file: string) => {
       if (file.endsWith('.wasm')) {
-        return path.join(__dirname, '../../node_modules/sql.js/dist/', file);
+        // Try multiple paths to find the WASM file
+        const possiblePaths = [
+          // Local development path
+          path.join(__dirname, '../../node_modules/sql.js/dist/', file),
+          // When installed as npm package
+          path.join(__dirname, '../../../sql.js/dist/', file),
+          // Alternative npm package path
+          path.join(process.cwd(), 'node_modules/sql.js/dist/', file),
+          // Try to resolve from require
+          path.join(path.dirname(require.resolve('sql.js')), '../dist/', file)
+        ];
+        
+        // Find the first existing path
+        for (const tryPath of possiblePaths) {
+          if (fsSync.existsSync(tryPath)) {
+            if (process.env.MCP_MODE !== 'stdio') {
+              logger.debug(`Found WASM file at: ${tryPath}`);
+            }
+            return tryPath;
+          }
+        }
+        
+        // If not found, try the last resort - require.resolve
+        try {
+          const wasmPath = require.resolve('sql.js/dist/sql-wasm.wasm');
+          if (process.env.MCP_MODE !== 'stdio') {
+            logger.debug(`Found WASM file via require.resolve: ${wasmPath}`);
+          }
+          return wasmPath;
+        } catch (e) {
+          // Fall back to the default path
+          logger.warn(`Could not find WASM file, using default path: ${file}`);
+          return file;
+        }
       }
       return file;
     }
@@ -173,6 +213,17 @@ class BetterSQLiteAdapter implements DatabaseAdapter {
   
   transaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
+  }
+  
+  checkFTS5Support(): boolean {
+    try {
+      // Test if FTS5 is available
+      this.exec("CREATE VIRTUAL TABLE IF NOT EXISTS test_fts5 USING fts5(content);");
+      this.exec("DROP TABLE IF EXISTS test_fts5;");
+      return true;
+    } catch (error) {
+      return false;
+    }
   }
 }
 
@@ -231,6 +282,18 @@ class SQLJSAdapter implements DatabaseAdapter {
     } catch (error) {
       this.exec('ROLLBACK');
       throw error;
+    }
+  }
+  
+  checkFTS5Support(): boolean {
+    try {
+      // Test if FTS5 is available
+      this.exec("CREATE VIRTUAL TABLE IF NOT EXISTS test_fts5 USING fts5(content);");
+      this.exec("DROP TABLE IF EXISTS test_fts5;");
+      return true;
+    } catch (error) {
+      // sql.js doesn't support FTS5
+      return false;
     }
   }
   
@@ -313,52 +376,71 @@ class SQLJSStatement implements PreparedStatement {
   constructor(private stmt: any, private onModify: () => void) {}
   
   run(...params: any[]): RunResult {
-    if (params.length > 0) {
-      this.bindParams(params);
-      this.stmt.bind(this.boundParams);
+    try {
+      if (params.length > 0) {
+        this.bindParams(params);
+        if (this.boundParams) {
+          this.stmt.bind(this.boundParams);
+        }
+      }
+      
+      this.stmt.run();
+      this.onModify();
+      
+      // sql.js doesn't provide changes/lastInsertRowid easily
+      return {
+        changes: 1, // Assume success means 1 change
+        lastInsertRowid: 0
+      };
+    } catch (error) {
+      this.stmt.reset();
+      throw error;
     }
-    
-    this.stmt.run();
-    this.onModify();
-    
-    // sql.js doesn't provide changes/lastInsertRowid easily
-    return {
-      changes: 0,
-      lastInsertRowid: 0
-    };
   }
   
   get(...params: any[]): any {
-    if (params.length > 0) {
-      this.bindParams(params);
-    }
-    
-    this.stmt.bind(this.boundParams);
-    
-    if (this.stmt.step()) {
-      const result = this.stmt.getAsObject();
+    try {
+      if (params.length > 0) {
+        this.bindParams(params);
+        if (this.boundParams) {
+          this.stmt.bind(this.boundParams);
+        }
+      }
+      
+      if (this.stmt.step()) {
+        const result = this.stmt.getAsObject();
+        this.stmt.reset();
+        return this.convertIntegerColumns(result);
+      }
+      
       this.stmt.reset();
-      return result;
+      return undefined;
+    } catch (error) {
+      this.stmt.reset();
+      throw error;
     }
-    
-    this.stmt.reset();
-    return undefined;
   }
   
   all(...params: any[]): any[] {
-    if (params.length > 0) {
-      this.bindParams(params);
+    try {
+      if (params.length > 0) {
+        this.bindParams(params);
+        if (this.boundParams) {
+          this.stmt.bind(this.boundParams);
+        }
+      }
+      
+      const results: any[] = [];
+      while (this.stmt.step()) {
+        results.push(this.convertIntegerColumns(this.stmt.getAsObject()));
+      }
+      
+      this.stmt.reset();
+      return results;
+    } catch (error) {
+      this.stmt.reset();
+      throw error;
     }
-    
-    this.stmt.bind(this.boundParams);
-    
-    const results: any[] = [];
-    while (this.stmt.step()) {
-      results.push(this.stmt.getAsObject());
-    }
-    
-    this.stmt.reset();
-    return results;
   }
   
   iterate(...params: any[]): IterableIterator<any> {
@@ -392,12 +474,38 @@ class SQLJSStatement implements PreparedStatement {
   }
   
   private bindParams(params: any[]): void {
-    if (params.length === 1 && typeof params[0] === 'object' && !Array.isArray(params[0])) {
+    if (params.length === 0) {
+      this.boundParams = null;
+      return;
+    }
+    
+    if (params.length === 1 && typeof params[0] === 'object' && !Array.isArray(params[0]) && params[0] !== null) {
       // Named parameters passed as object
       this.boundParams = params[0];
     } else {
       // Positional parameters - sql.js uses array for positional
-      this.boundParams = params;
+      // Filter out undefined values that might cause issues
+      this.boundParams = params.map(p => p === undefined ? null : p);
     }
+  }
+  
+  /**
+   * Convert SQLite integer columns to JavaScript numbers
+   * sql.js returns all values as strings, but we need proper types for boolean conversion
+   */
+  private convertIntegerColumns(row: any): any {
+    if (!row) return row;
+    
+    // Known integer columns in the nodes table
+    const integerColumns = ['is_ai_tool', 'is_trigger', 'is_webhook', 'is_versioned'];
+    
+    const converted = { ...row };
+    for (const col of integerColumns) {
+      if (col in converted && typeof converted[col] === 'string') {
+        converted[col] = parseInt(converted[col], 10);
+      }
+    }
+    
+    return converted;
   }
 }

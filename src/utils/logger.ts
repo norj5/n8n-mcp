@@ -20,6 +20,7 @@ export class Logger {
   private readonly isStdio = process.env.MCP_MODE === 'stdio';
   private readonly isDisabled = process.env.DISABLE_CONSOLE_OUTPUT === 'true';
   private readonly isHttp = process.env.MCP_MODE === 'http';
+  private readonly isTest = process.env.NODE_ENV === 'test' || process.env.TEST_ENVIRONMENT === 'true';
 
   constructor(config?: Partial<LoggerConfig>) {
     this.config = {
@@ -55,20 +56,26 @@ export class Logger {
   }
 
   private log(level: LogLevel, levelName: string, message: string, ...args: any[]): void {
+    // Allow ERROR level logs through in more cases for debugging
+    const allowErrorLogs = level === LogLevel.ERROR && (this.isHttp || process.env.DEBUG === 'true');
+    
     // Check environment variables FIRST, before level check
-    // In stdio mode, suppress ALL console output to avoid corrupting JSON-RPC
-    if (this.isStdio || this.isDisabled) {
-      // Silently drop all logs in stdio mode
-      return;
+    // In stdio mode, suppress ALL console output to avoid corrupting JSON-RPC (except errors when debugging)
+    // Also suppress in test mode unless debug is explicitly enabled
+    if (this.isStdio || this.isDisabled || (this.isTest && process.env.DEBUG !== 'true')) {
+      // Allow error logs through if debugging is enabled
+      if (!allowErrorLogs) {
+        return;
+      }
     }
     
-    if (level <= this.config.level) {
+    if (level <= this.config.level || allowErrorLogs) {
       const formattedMessage = this.formatMessage(levelName, message);
       
-      // In HTTP mode during request handling, suppress console output
+      // In HTTP mode during request handling, suppress console output (except errors)
       // The ConsoleManager will handle this, but we add a safety check
-      if (this.isHttp && process.env.MCP_REQUEST_ACTIVE === 'true') {
-        // Silently drop the log during active MCP requests
+      if (this.isHttp && process.env.MCP_REQUEST_ACTIVE === 'true' && !allowErrorLogs) {
+        // Silently drop the log during active MCP requests (except errors)
         return;
       }
       

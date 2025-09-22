@@ -5,15 +5,16 @@ import {
   ListToolsRequestSchema,
   InitializeRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { existsSync } from 'fs';
+import { existsSync, promises as fs } from 'fs';
 import path from 'path';
 import { n8nDocumentationToolsFinal } from './tools';
 import { n8nManagementTools } from './tools-n8n-manager';
+import { makeToolsN8nFriendly } from './tools-n8n-friendly';
+import { getWorkflowExampleString } from './workflow-examples';
 import { logger } from '../utils/logger';
 import { NodeRepository } from '../database/node-repository';
 import { DatabaseAdapter, createDatabaseAdapter } from '../database/database-adapter';
 import { PropertyFilter } from '../services/property-filter';
-import { ExampleGenerator } from '../services/example-generator';
 import { TaskTemplates } from '../services/task-templates';
 import { ConfigValidator } from '../services/config-validator';
 import { EnhancedConfigValidator, ValidationMode, ValidationProfile } from '../services/enhanced-config-validator';
@@ -26,6 +27,14 @@ import * as n8nHandlers from './handlers-n8n-manager';
 import { handleUpdatePartialWorkflow } from './handlers-workflow-diff';
 import { getToolDocumentation, getToolsOverview } from './tools-documentation';
 import { PROJECT_VERSION } from '../utils/version';
+import { normalizeNodeType, getNodeTypeAlternatives, getWorkflowNodeType } from '../utils/node-utils';
+import { ToolValidation, Validator, ValidationError } from '../utils/validation-schemas';
+import {
+  negotiateProtocolVersion,
+  logProtocolNegotiation,
+  STANDARD_PROTOCOL_VERSION
+} from '../utils/protocol-version';
+import { InstanceContext } from '../types/instance-context';
 
 interface NodeRow {
   node_type: string;
@@ -52,20 +61,32 @@ export class N8NDocumentationMCPServer {
   private templateService: TemplateService | null = null;
   private initialized: Promise<void>;
   private cache = new SimpleCache();
+  private clientInfo: any = null;
+  private instanceContext?: InstanceContext;
 
-  constructor() {
-    // Try multiple database paths
-    const possiblePaths = [
-      path.join(process.cwd(), 'data', 'nodes.db'),
-      path.join(__dirname, '../../data', 'nodes.db'),
-      './data/nodes.db'
-    ];
-    
+  constructor(instanceContext?: InstanceContext) {
+    this.instanceContext = instanceContext;
+    // Check for test environment first
+    const envDbPath = process.env.NODE_DB_PATH;
     let dbPath: string | null = null;
-    for (const p of possiblePaths) {
-      if (existsSync(p)) {
-        dbPath = p;
-        break;
+    
+    let possiblePaths: string[] = [];
+    
+    if (envDbPath && (envDbPath === ':memory:' || existsSync(envDbPath))) {
+      dbPath = envDbPath;
+    } else {
+      // Try multiple database paths
+      possiblePaths = [
+        path.join(process.cwd(), 'data', 'nodes.db'),
+        path.join(__dirname, '../../data', 'nodes.db'),
+        './data/nodes.db'
+      ];
+      
+      for (const p of possiblePaths) {
+        if (existsSync(p)) {
+          dbPath = p;
+          break;
+        }
       }
     }
     
@@ -105,12 +126,34 @@ export class N8NDocumentationMCPServer {
   private async initializeDatabase(dbPath: string): Promise<void> {
     try {
       this.db = await createDatabaseAdapter(dbPath);
+      
+      // If using in-memory database for tests, initialize schema
+      if (dbPath === ':memory:') {
+        await this.initializeInMemorySchema();
+      }
+      
       this.repository = new NodeRepository(this.db);
       this.templateService = new TemplateService(this.db);
       logger.info(`Initialized database from: ${dbPath}`);
     } catch (error) {
       logger.error('Failed to initialize database:', error);
       throw new Error(`Failed to open database: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+  
+  private async initializeInMemorySchema(): Promise<void> {
+    if (!this.db) return;
+    
+    // Read and execute schema
+    const schemaPath = path.join(__dirname, '../../src/database/schema.sql');
+    const schema = await fs.readFile(schemaPath, 'utf-8');
+    
+    // Execute schema statements
+    const statements = schema.split(';').filter(stmt => stmt.trim());
+    for (const statement of statements) {
+      if (statement.trim()) {
+        this.db.exec(statement);
+      }
     }
   }
   
@@ -123,9 +166,39 @@ export class N8NDocumentationMCPServer {
 
   private setupHandlers(): void {
     // Handle initialization
-    this.server.setRequestHandler(InitializeRequestSchema, async () => {
+    this.server.setRequestHandler(InitializeRequestSchema, async (request) => {
+      const clientVersion = request.params.protocolVersion;
+      const clientCapabilities = request.params.capabilities;
+      const clientInfo = request.params.clientInfo;
+      
+      logger.info('MCP Initialize request received', {
+        clientVersion,
+        clientCapabilities,
+        clientInfo
+      });
+      
+      // Store client info for later use
+      this.clientInfo = clientInfo;
+      
+      // Negotiate protocol version based on client information
+      const negotiationResult = negotiateProtocolVersion(
+        clientVersion,
+        clientInfo,
+        undefined, // no user agent in MCP protocol
+        undefined  // no headers in MCP protocol
+      );
+      
+      logProtocolNegotiation(negotiationResult, logger, 'MCP_INITIALIZE');
+      
+      // Warn if there's a version mismatch (for debugging)
+      if (clientVersion && clientVersion !== negotiationResult.version) {
+        logger.warn(`Protocol version negotiated: client requested ${clientVersion}, server will use ${negotiationResult.version}`, {
+          reasoning: negotiationResult.reasoning
+        });
+      }
+      
       const response = {
-        protocolVersion: '2024-11-05',
+        protocolVersion: negotiationResult.version,
         capabilities: {
           tools: {},
         },
@@ -135,26 +208,60 @@ export class N8NDocumentationMCPServer {
         },
       };
       
-      // Debug logging
-      if (process.env.DEBUG_MCP === 'true') {
-        logger.debug('Initialize handler called', { response });
-      }
-      
+      logger.info('MCP Initialize response', { response });
       return response;
     });
 
     // Handle tool listing
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+    this.server.setRequestHandler(ListToolsRequestSchema, async (request) => {
       // Combine documentation tools with management tools if API is configured
-      const tools = [...n8nDocumentationToolsFinal];
-      const isConfigured = isN8nApiConfigured();
-      
-      if (isConfigured) {
+      let tools = [...n8nDocumentationToolsFinal];
+
+      // Check if n8n API tools should be available
+      // 1. Environment variables (backward compatibility)
+      // 2. Instance context (multi-tenant support)
+      // 3. Multi-tenant mode enabled (always show tools, runtime checks will handle auth)
+      const hasEnvConfig = isN8nApiConfigured();
+      const hasInstanceConfig = !!(this.instanceContext?.n8nApiUrl && this.instanceContext?.n8nApiKey);
+      const isMultiTenantEnabled = process.env.ENABLE_MULTI_TENANT === 'true';
+
+      const shouldIncludeManagementTools = hasEnvConfig || hasInstanceConfig || isMultiTenantEnabled;
+
+      if (shouldIncludeManagementTools) {
         tools.push(...n8nManagementTools);
-        logger.debug(`Tool listing: ${tools.length} tools available (${n8nDocumentationToolsFinal.length} documentation + ${n8nManagementTools.length} management)`);
+        logger.debug(`Tool listing: ${tools.length} tools available (${n8nDocumentationToolsFinal.length} documentation + ${n8nManagementTools.length} management)`, {
+          hasEnvConfig,
+          hasInstanceConfig,
+          isMultiTenantEnabled
+        });
       } else {
-        logger.debug(`Tool listing: ${tools.length} tools available (documentation only)`);
+        logger.debug(`Tool listing: ${tools.length} tools available (documentation only)`, {
+          hasEnvConfig,
+          hasInstanceConfig,
+          isMultiTenantEnabled
+        });
       }
+      
+      // Check if client is n8n (from initialization)
+      const clientInfo = this.clientInfo;
+      const isN8nClient = clientInfo?.name?.includes('n8n') || 
+                         clientInfo?.name?.includes('langchain');
+      
+      if (isN8nClient) {
+        logger.info('Detected n8n client, using n8n-friendly tool descriptions');
+        tools = makeToolsN8nFriendly(tools);
+      }
+      
+      // Log validation tools' input schemas for debugging
+      const validationTools = tools.filter(t => t.name.startsWith('validate_'));
+      validationTools.forEach(tool => {
+        logger.info('Validation tool schema', {
+          toolName: tool.name,
+          inputSchema: JSON.stringify(tool.inputSchema, null, 2),
+          hasOutputSchema: !!tool.outputSchema,
+          description: tool.description
+        });
+      });
       
       return { tools };
     });
@@ -163,25 +270,124 @@ export class N8NDocumentationMCPServer {
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
       
+      // Enhanced logging for debugging tool calls
+      logger.info('Tool call received - DETAILED DEBUG', {
+        toolName: name,
+        arguments: JSON.stringify(args, null, 2),
+        argumentsType: typeof args,
+        argumentsKeys: args ? Object.keys(args) : [],
+        hasNodeType: args && 'nodeType' in args,
+        hasConfig: args && 'config' in args,
+        configType: args && args.config ? typeof args.config : 'N/A',
+        rawRequest: JSON.stringify(request.params)
+      });
+      
+      // Workaround for n8n's nested output bug
+      // Check if args contains nested 'output' structure from n8n's memory corruption
+      let processedArgs = args;
+      if (args && typeof args === 'object' && 'output' in args) {
+        try {
+          const possibleNestedData = args.output;
+          // If output is a string that looks like JSON, try to parse it
+          if (typeof possibleNestedData === 'string' && possibleNestedData.trim().startsWith('{')) {
+            const parsed = JSON.parse(possibleNestedData);
+            if (parsed && typeof parsed === 'object') {
+              logger.warn('Detected n8n nested output bug, attempting to extract actual arguments', {
+                originalArgs: args,
+                extractedArgs: parsed
+              });
+              
+              // Validate the extracted arguments match expected tool schema
+              if (this.validateExtractedArgs(name, parsed)) {
+                // Use the extracted data as args
+                processedArgs = parsed;
+              } else {
+                logger.warn('Extracted arguments failed validation, using original args', {
+                  toolName: name,
+                  extractedArgs: parsed
+                });
+              }
+            }
+          }
+        } catch (parseError) {
+          logger.debug('Failed to parse nested output, continuing with original args', { 
+            error: parseError instanceof Error ? parseError.message : String(parseError) 
+          });
+        }
+      }
+      
       try {
-        logger.debug(`Executing tool: ${name}`, { args });
-        const result = await this.executeTool(name, args);
+        logger.debug(`Executing tool: ${name}`, { args: processedArgs });
+        const result = await this.executeTool(name, processedArgs);
         logger.debug(`Tool ${name} executed successfully`);
-        return {
+        
+        // Ensure the result is properly formatted for MCP
+        let responseText: string;
+        let structuredContent: any = null;
+        
+        try {
+          // For validation tools, check if we should use structured content
+          if (name.startsWith('validate_') && typeof result === 'object' && result !== null) {
+            // Clean up the result to ensure it matches the outputSchema
+            const cleanResult = this.sanitizeValidationResult(result, name);
+            structuredContent = cleanResult;
+            responseText = JSON.stringify(cleanResult, null, 2);
+          } else {
+            responseText = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+          }
+        } catch (jsonError) {
+          logger.warn(`Failed to stringify tool result for ${name}:`, jsonError);
+          responseText = String(result);
+        }
+        
+        // Validate response size (n8n might have limits)
+        if (responseText.length > 1000000) { // 1MB limit
+          logger.warn(`Tool ${name} response is very large (${responseText.length} chars), truncating`);
+          responseText = responseText.substring(0, 999000) + '\n\n[Response truncated due to size limits]';
+          structuredContent = null; // Don't use structured content for truncated responses
+        }
+        
+        // Build MCP response with strict schema compliance
+        const mcpResponse: any = {
           content: [
             {
-              type: 'text',
-              text: JSON.stringify(result, null, 2),
+              type: 'text' as const,
+              text: responseText,
             },
           ],
         };
+        
+        // For tools with outputSchema, structuredContent is REQUIRED by MCP spec
+        if (name.startsWith('validate_') && structuredContent !== null) {
+          mcpResponse.structuredContent = structuredContent;
+        }
+        
+        return mcpResponse;
       } catch (error) {
         logger.error(`Error executing tool ${name}`, error);
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        
+        // Provide more helpful error messages for common n8n issues
+        let helpfulMessage = `Error executing tool ${name}: ${errorMessage}`;
+        
+        if (errorMessage.includes('required') || errorMessage.includes('missing')) {
+          helpfulMessage += '\n\nNote: This error often occurs when the AI agent sends incomplete or incorrectly formatted parameters. Please ensure all required fields are provided with the correct types.';
+        } else if (errorMessage.includes('type') || errorMessage.includes('expected')) {
+          helpfulMessage += '\n\nNote: This error indicates a type mismatch. The AI agent may be sending data in the wrong format (e.g., string instead of object).';
+        } else if (errorMessage.includes('Unknown category') || errorMessage.includes('not found')) {
+          helpfulMessage += '\n\nNote: The requested resource or category was not found. Please check the available options.';
+        }
+        
+        // For n8n schema errors, add specific guidance
+        if (name.startsWith('validate_') && (errorMessage.includes('config') || errorMessage.includes('nodeType'))) {
+          helpfulMessage += '\n\nFor validation tools:\n- nodeType should be a string (e.g., "nodes-base.webhook")\n- config should be an object (e.g., {})';
+        }
+        
         return {
           content: [
             {
               type: 'text',
-              text: `Error executing tool ${name}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+              text: helpfulMessage,
             },
           ],
           isError: true,
@@ -190,90 +396,459 @@ export class N8NDocumentationMCPServer {
     });
   }
 
+  /**
+   * Sanitize validation result to match outputSchema
+   */
+  private sanitizeValidationResult(result: any, toolName: string): any {
+    if (!result || typeof result !== 'object') {
+      return result;
+    }
+
+    const sanitized = { ...result };
+
+    // Ensure required fields exist with proper types and filter to schema-defined fields only
+    if (toolName === 'validate_node_minimal') {
+      // Filter to only schema-defined fields
+      const filtered = {
+        nodeType: String(sanitized.nodeType || ''),
+        displayName: String(sanitized.displayName || ''),
+        valid: Boolean(sanitized.valid),
+        missingRequiredFields: Array.isArray(sanitized.missingRequiredFields) 
+          ? sanitized.missingRequiredFields.map(String) 
+          : []
+      };
+      return filtered;
+    } else if (toolName === 'validate_node_operation') {
+      // Ensure summary exists
+      let summary = sanitized.summary;
+      if (!summary || typeof summary !== 'object') {
+        summary = {
+          hasErrors: Array.isArray(sanitized.errors) ? sanitized.errors.length > 0 : false,
+          errorCount: Array.isArray(sanitized.errors) ? sanitized.errors.length : 0,
+          warningCount: Array.isArray(sanitized.warnings) ? sanitized.warnings.length : 0,
+          suggestionCount: Array.isArray(sanitized.suggestions) ? sanitized.suggestions.length : 0
+        };
+      }
+      
+      // Filter to only schema-defined fields
+      const filtered = {
+        nodeType: String(sanitized.nodeType || ''),
+        workflowNodeType: String(sanitized.workflowNodeType || sanitized.nodeType || ''),
+        displayName: String(sanitized.displayName || ''),
+        valid: Boolean(sanitized.valid),
+        errors: Array.isArray(sanitized.errors) ? sanitized.errors : [],
+        warnings: Array.isArray(sanitized.warnings) ? sanitized.warnings : [],
+        suggestions: Array.isArray(sanitized.suggestions) ? sanitized.suggestions : [],
+        summary: summary
+      };
+      return filtered;
+    } else if (toolName.startsWith('validate_workflow')) {
+      sanitized.valid = Boolean(sanitized.valid);
+      
+      // Ensure arrays exist
+      sanitized.errors = Array.isArray(sanitized.errors) ? sanitized.errors : [];
+      sanitized.warnings = Array.isArray(sanitized.warnings) ? sanitized.warnings : [];
+      
+      // Ensure statistics/summary exists
+      if (toolName === 'validate_workflow') {
+        if (!sanitized.summary || typeof sanitized.summary !== 'object') {
+          sanitized.summary = {
+            totalNodes: 0,
+            enabledNodes: 0,
+            triggerNodes: 0,
+            validConnections: 0,
+            invalidConnections: 0,
+            expressionsValidated: 0,
+            errorCount: sanitized.errors.length,
+            warningCount: sanitized.warnings.length
+          };
+        }
+      } else {
+        if (!sanitized.statistics || typeof sanitized.statistics !== 'object') {
+          sanitized.statistics = {
+            totalNodes: 0,
+            triggerNodes: 0,
+            validConnections: 0,
+            invalidConnections: 0,
+            expressionsValidated: 0
+          };
+        }
+      }
+    }
+
+    // Remove undefined values to ensure clean JSON
+    return JSON.parse(JSON.stringify(sanitized));
+  }
+
+  /**
+   * Enhanced parameter validation using schemas
+   */
+  private validateToolParams(toolName: string, args: any, legacyRequiredParams?: string[]): void {
+    try {
+      // If legacy required params are provided, use the new validation but fall back to basic if needed
+      let validationResult;
+      
+      switch (toolName) {
+        case 'validate_node_operation':
+          validationResult = ToolValidation.validateNodeOperation(args);
+          break;
+        case 'validate_node_minimal':
+          validationResult = ToolValidation.validateNodeMinimal(args);
+          break;
+        case 'validate_workflow':
+        case 'validate_workflow_connections':
+        case 'validate_workflow_expressions':
+          validationResult = ToolValidation.validateWorkflow(args);
+          break;
+      case 'search_nodes':
+        validationResult = ToolValidation.validateSearchNodes(args);
+        break;
+      case 'list_node_templates':
+        validationResult = ToolValidation.validateListNodeTemplates(args);
+        break;
+      case 'n8n_create_workflow':
+        validationResult = ToolValidation.validateCreateWorkflow(args);
+        break;
+      case 'n8n_get_workflow':
+      case 'n8n_get_workflow_details':
+      case 'n8n_get_workflow_structure':
+      case 'n8n_get_workflow_minimal':
+      case 'n8n_update_full_workflow':
+      case 'n8n_delete_workflow':
+      case 'n8n_validate_workflow':
+      case 'n8n_get_execution':
+      case 'n8n_delete_execution':
+        validationResult = ToolValidation.validateWorkflowId(args);
+        break;
+      default:
+        // For tools not yet migrated to schema validation, use basic validation
+        return this.validateToolParamsBasic(toolName, args, legacyRequiredParams || []);
+      }
+      
+      if (!validationResult.valid) {
+        const errorMessage = Validator.formatErrors(validationResult, toolName);
+        logger.error(`Parameter validation failed for ${toolName}:`, errorMessage);
+        throw new ValidationError(errorMessage);
+      }
+    } catch (error) {
+      // Handle validation errors properly
+      if (error instanceof ValidationError) {
+        throw error; // Re-throw validation errors as-is
+      }
+      
+      // Handle unexpected errors from validation system
+      logger.error(`Validation system error for ${toolName}:`, error);
+      
+      // Provide a user-friendly error message
+      const errorMessage = error instanceof Error 
+        ? `Internal validation error: ${error.message}`
+        : `Internal validation error while processing ${toolName}`;
+      
+      throw new Error(errorMessage);
+    }
+  }
+  
+  /**
+   * Legacy parameter validation (fallback)
+   */
+  private validateToolParamsBasic(toolName: string, args: any, requiredParams: string[]): void {
+    const missing: string[] = [];
+    
+    for (const param of requiredParams) {
+      if (!(param in args) || args[param] === undefined || args[param] === null) {
+        missing.push(param);
+      }
+    }
+    
+    if (missing.length > 0) {
+      throw new Error(`Missing required parameters for ${toolName}: ${missing.join(', ')}. Please provide the required parameters to use this tool.`);
+    }
+  }
+
+  /**
+   * Validate extracted arguments match expected tool schema
+   */
+  private validateExtractedArgs(toolName: string, args: any): boolean {
+    if (!args || typeof args !== 'object') {
+      return false;
+    }
+
+    // Get all available tools
+    const allTools = [...n8nDocumentationToolsFinal, ...n8nManagementTools];
+    const tool = allTools.find(t => t.name === toolName);
+    if (!tool || !tool.inputSchema) {
+      return true; // If no schema, assume valid
+    }
+
+    const schema = tool.inputSchema;
+    const required = schema.required || [];
+    const properties = schema.properties || {};
+
+    // Check all required fields are present
+    for (const requiredField of required) {
+      if (!(requiredField in args)) {
+        logger.debug(`Extracted args missing required field: ${requiredField}`, {
+          toolName,
+          extractedArgs: args,
+          required
+        });
+        return false;
+      }
+    }
+
+    // Check field types match schema
+    for (const [fieldName, fieldValue] of Object.entries(args)) {
+      if (properties[fieldName]) {
+        const expectedType = properties[fieldName].type;
+        const actualType = Array.isArray(fieldValue) ? 'array' : typeof fieldValue;
+
+        // Basic type validation
+        if (expectedType && expectedType !== actualType) {
+          // Special case: number can be coerced from string
+          if (expectedType === 'number' && actualType === 'string' && !isNaN(Number(fieldValue))) {
+            continue;
+          }
+          
+          logger.debug(`Extracted args field type mismatch: ${fieldName}`, {
+            toolName,
+            expectedType,
+            actualType,
+            fieldValue
+          });
+          return false;
+        }
+      }
+    }
+
+    // Check for extraneous fields if additionalProperties is false
+    if (schema.additionalProperties === false) {
+      const allowedFields = Object.keys(properties);
+      const extraFields = Object.keys(args).filter(field => !allowedFields.includes(field));
+      
+      if (extraFields.length > 0) {
+        logger.debug(`Extracted args have extra fields`, {
+          toolName,
+          extraFields,
+          allowedFields
+        });
+        // For n8n compatibility, we'll still consider this valid but log it
+      }
+    }
+
+    return true;
+  }
+
   async executeTool(name: string, args: any): Promise<any> {
+    // Ensure args is an object and validate it
+    args = args || {};
+    
+    // Log the tool call for debugging n8n issues
+    logger.info(`Tool execution: ${name}`, { 
+      args: typeof args === 'object' ? JSON.stringify(args) : args,
+      argsType: typeof args,
+      argsKeys: typeof args === 'object' ? Object.keys(args) : 'not-object'
+    });
+    
+    // Validate that args is actually an object
+    if (typeof args !== 'object' || args === null) {
+      throw new Error(`Invalid arguments for tool ${name}: expected object, got ${typeof args}`);
+    }
+    
     switch (name) {
       case 'tools_documentation':
+        // No required parameters
         return this.getToolsDocumentation(args.topic, args.depth);
       case 'list_nodes':
+        // No required parameters
         return this.listNodes(args);
       case 'get_node_info':
+        this.validateToolParams(name, args, ['nodeType']);
         return this.getNodeInfo(args.nodeType);
       case 'search_nodes':
-        return this.searchNodes(args.query, args.limit);
+        this.validateToolParams(name, args, ['query']);
+        // Convert limit to number if provided, otherwise use default
+        const limit = args.limit !== undefined ? Number(args.limit) || 20 : 20;
+        return this.searchNodes(args.query, limit, { mode: args.mode });
       case 'list_ai_tools':
+        // No required parameters
         return this.listAITools();
       case 'get_node_documentation':
+        this.validateToolParams(name, args, ['nodeType']);
         return this.getNodeDocumentation(args.nodeType);
       case 'get_database_statistics':
+        // No required parameters
         return this.getDatabaseStatistics();
       case 'get_node_essentials':
+        this.validateToolParams(name, args, ['nodeType']);
         return this.getNodeEssentials(args.nodeType);
       case 'search_node_properties':
-        return this.searchNodeProperties(args.nodeType, args.query, args.maxResults);
+        this.validateToolParams(name, args, ['nodeType', 'query']);
+        const maxResults = args.maxResults !== undefined ? Number(args.maxResults) || 20 : 20;
+        return this.searchNodeProperties(args.nodeType, args.query, maxResults);
       case 'get_node_for_task':
+        this.validateToolParams(name, args, ['task']);
         return this.getNodeForTask(args.task);
       case 'list_tasks':
+        // No required parameters
         return this.listTasks(args.category);
       case 'validate_node_operation':
+        this.validateToolParams(name, args, ['nodeType', 'config']);
+        // Ensure config is an object
+        if (typeof args.config !== 'object' || args.config === null) {
+          logger.warn(`validate_node_operation called with invalid config type: ${typeof args.config}`);
+          return {
+            nodeType: args.nodeType || 'unknown',
+            workflowNodeType: args.nodeType || 'unknown',
+            displayName: 'Unknown Node',
+            valid: false,
+            errors: [{
+              type: 'config',
+              property: 'config',
+              message: 'Invalid config format - expected object',
+              fix: 'Provide config as an object with node properties'
+            }],
+            warnings: [],
+            suggestions: [
+              '🔧 RECOVERY: Invalid config detected. Fix with:',
+              '   • Ensure config is an object: { "resource": "...", "operation": "..." }',
+              '   • Use get_node_essentials to see required fields for this node type',
+              '   • Check if the node type is correct before configuring it'
+            ],
+            summary: {
+              hasErrors: true,
+              errorCount: 1,
+              warningCount: 0,
+              suggestionCount: 3
+            }
+          };
+        }
         return this.validateNodeConfig(args.nodeType, args.config, 'operation', args.profile);
       case 'validate_node_minimal':
+        this.validateToolParams(name, args, ['nodeType', 'config']);
+        // Ensure config is an object
+        if (typeof args.config !== 'object' || args.config === null) {
+          logger.warn(`validate_node_minimal called with invalid config type: ${typeof args.config}`);
+          return {
+            nodeType: args.nodeType || 'unknown',
+            displayName: 'Unknown Node',
+            valid: false,
+            missingRequiredFields: [
+              'Invalid config format - expected object',
+              '🔧 RECOVERY: Use format { "resource": "...", "operation": "..." } or {} for empty config'
+            ]
+          };
+        }
         return this.validateNodeMinimal(args.nodeType, args.config);
       case 'get_property_dependencies':
+        this.validateToolParams(name, args, ['nodeType']);
         return this.getPropertyDependencies(args.nodeType, args.config);
       case 'get_node_as_tool_info':
+        this.validateToolParams(name, args, ['nodeType']);
         return this.getNodeAsToolInfo(args.nodeType);
+      case 'list_templates':
+        // No required params
+        const listLimit = Math.min(Math.max(Number(args.limit) || 10, 1), 100);
+        const listOffset = Math.max(Number(args.offset) || 0, 0);
+        const sortBy = args.sortBy || 'views';
+        const includeMetadata = Boolean(args.includeMetadata);
+        return this.listTemplates(listLimit, listOffset, sortBy, includeMetadata);
       case 'list_node_templates':
-        return this.listNodeTemplates(args.nodeTypes, args.limit);
+        this.validateToolParams(name, args, ['nodeTypes']);
+        const templateLimit = Math.min(Math.max(Number(args.limit) || 10, 1), 100);
+        const templateOffset = Math.max(Number(args.offset) || 0, 0);
+        return this.listNodeTemplates(args.nodeTypes, templateLimit, templateOffset);
       case 'get_template':
-        return this.getTemplate(args.templateId);
+        this.validateToolParams(name, args, ['templateId']);
+        const templateId = Number(args.templateId);
+        const mode = args.mode || 'full';
+        return this.getTemplate(templateId, mode);
       case 'search_templates':
-        return this.searchTemplates(args.query, args.limit);
+        this.validateToolParams(name, args, ['query']);
+        const searchLimit = Math.min(Math.max(Number(args.limit) || 20, 1), 100);
+        const searchOffset = Math.max(Number(args.offset) || 0, 0);
+        const searchFields = args.fields as string[] | undefined;
+        return this.searchTemplates(args.query, searchLimit, searchOffset, searchFields);
       case 'get_templates_for_task':
-        return this.getTemplatesForTask(args.task);
+        this.validateToolParams(name, args, ['task']);
+        const taskLimit = Math.min(Math.max(Number(args.limit) || 10, 1), 100);
+        const taskOffset = Math.max(Number(args.offset) || 0, 0);
+        return this.getTemplatesForTask(args.task, taskLimit, taskOffset);
+      case 'search_templates_by_metadata':
+        // No required params - all filters are optional
+        const metadataLimit = Math.min(Math.max(Number(args.limit) || 20, 1), 100);
+        const metadataOffset = Math.max(Number(args.offset) || 0, 0);
+        return this.searchTemplatesByMetadata({
+          category: args.category,
+          complexity: args.complexity,
+          maxSetupMinutes: args.maxSetupMinutes ? Number(args.maxSetupMinutes) : undefined,
+          minSetupMinutes: args.minSetupMinutes ? Number(args.minSetupMinutes) : undefined,
+          requiredService: args.requiredService,
+          targetAudience: args.targetAudience
+        }, metadataLimit, metadataOffset);
       case 'validate_workflow':
+        this.validateToolParams(name, args, ['workflow']);
         return this.validateWorkflow(args.workflow, args.options);
       case 'validate_workflow_connections':
+        this.validateToolParams(name, args, ['workflow']);
         return this.validateWorkflowConnections(args.workflow);
       case 'validate_workflow_expressions':
+        this.validateToolParams(name, args, ['workflow']);
         return this.validateWorkflowExpressions(args.workflow);
       
       // n8n Management Tools (if API is configured)
       case 'n8n_create_workflow':
-        return n8nHandlers.handleCreateWorkflow(args);
+        this.validateToolParams(name, args, ['name', 'nodes', 'connections']);
+        return n8nHandlers.handleCreateWorkflow(args, this.instanceContext);
       case 'n8n_get_workflow':
-        return n8nHandlers.handleGetWorkflow(args);
+        this.validateToolParams(name, args, ['id']);
+        return n8nHandlers.handleGetWorkflow(args, this.instanceContext);
       case 'n8n_get_workflow_details':
-        return n8nHandlers.handleGetWorkflowDetails(args);
+        this.validateToolParams(name, args, ['id']);
+        return n8nHandlers.handleGetWorkflowDetails(args, this.instanceContext);
       case 'n8n_get_workflow_structure':
-        return n8nHandlers.handleGetWorkflowStructure(args);
+        this.validateToolParams(name, args, ['id']);
+        return n8nHandlers.handleGetWorkflowStructure(args, this.instanceContext);
       case 'n8n_get_workflow_minimal':
-        return n8nHandlers.handleGetWorkflowMinimal(args);
+        this.validateToolParams(name, args, ['id']);
+        return n8nHandlers.handleGetWorkflowMinimal(args, this.instanceContext);
       case 'n8n_update_full_workflow':
-        return n8nHandlers.handleUpdateWorkflow(args);
+        this.validateToolParams(name, args, ['id']);
+        return n8nHandlers.handleUpdateWorkflow(args, this.instanceContext);
       case 'n8n_update_partial_workflow':
-        return handleUpdatePartialWorkflow(args);
+        this.validateToolParams(name, args, ['id', 'operations']);
+        return handleUpdatePartialWorkflow(args, this.instanceContext);
       case 'n8n_delete_workflow':
-        return n8nHandlers.handleDeleteWorkflow(args);
+        this.validateToolParams(name, args, ['id']);
+        return n8nHandlers.handleDeleteWorkflow(args, this.instanceContext);
       case 'n8n_list_workflows':
-        return n8nHandlers.handleListWorkflows(args);
+        // No required parameters
+        return n8nHandlers.handleListWorkflows(args, this.instanceContext);
       case 'n8n_validate_workflow':
+        this.validateToolParams(name, args, ['id']);
         await this.ensureInitialized();
         if (!this.repository) throw new Error('Repository not initialized');
-        return n8nHandlers.handleValidateWorkflow(args, this.repository);
+        return n8nHandlers.handleValidateWorkflow(args, this.repository, this.instanceContext);
       case 'n8n_trigger_webhook_workflow':
-        return n8nHandlers.handleTriggerWebhookWorkflow(args);
+        this.validateToolParams(name, args, ['webhookUrl']);
+        return n8nHandlers.handleTriggerWebhookWorkflow(args, this.instanceContext);
       case 'n8n_get_execution':
-        return n8nHandlers.handleGetExecution(args);
+        this.validateToolParams(name, args, ['id']);
+        return n8nHandlers.handleGetExecution(args, this.instanceContext);
       case 'n8n_list_executions':
-        return n8nHandlers.handleListExecutions(args);
+        // No required parameters
+        return n8nHandlers.handleListExecutions(args, this.instanceContext);
       case 'n8n_delete_execution':
-        return n8nHandlers.handleDeleteExecution(args);
+        this.validateToolParams(name, args, ['id']);
+        return n8nHandlers.handleDeleteExecution(args, this.instanceContext);
       case 'n8n_health_check':
-        return n8nHandlers.handleHealthCheck();
+        // No required parameters
+        return n8nHandlers.handleHealthCheck(this.instanceContext);
       case 'n8n_list_available_tools':
-        return n8nHandlers.handleListAvailableTools();
+        // No required parameters
+        return n8nHandlers.handleListAvailableTools(this.instanceContext);
       case 'n8n_diagnostic':
-        return n8nHandlers.handleDiagnostic({ params: { arguments: args } });
+        // No required parameters
+        return n8nHandlers.handleDiagnostic({ params: { arguments: args } }, this.instanceContext);
         
       default:
         throw new Error(`Unknown tool: ${name}`);
@@ -331,9 +906,9 @@ export class N8NDocumentationMCPServer {
         category: node.category,
         package: node.package_name,
         developmentStyle: node.development_style,
-        isAITool: !!node.is_ai_tool,
-        isTrigger: !!node.is_trigger,
-        isVersioned: !!node.is_versioned,
+        isAITool: Number(node.is_ai_tool) === 1,
+        isTrigger: Number(node.is_trigger) === 1,
+        isVersioned: Number(node.is_versioned) === 1,
       })),
       totalCount: nodes.length,
     };
@@ -342,16 +917,19 @@ export class N8NDocumentationMCPServer {
   private async getNodeInfo(nodeType: string): Promise<any> {
     await this.ensureInitialized();
     if (!this.repository) throw new Error('Repository not initialized');
-    let node = this.repository.getNode(nodeType);
+    
+    // First try with normalized type
+    const normalizedType = normalizeNodeType(nodeType);
+    let node = this.repository.getNode(normalizedType);
+    
+    if (!node && normalizedType !== nodeType) {
+      // Try original if normalization changed it
+      node = this.repository.getNode(nodeType);
+    }
     
     if (!node) {
-      // Try alternative formats
-      const alternatives = [
-        nodeType,
-        nodeType.replace('n8n-nodes-base.', ''),
-        `n8n-nodes-base.${nodeType}`,
-        nodeType.toLowerCase()
-      ];
+      // Fallback to other alternatives for edge cases
+      const alternatives = getNodeTypeAlternatives(normalizedType);
       
       for (const alt of alternatives) {
         const found = this.repository!.getNode(alt);
@@ -360,10 +938,10 @@ export class N8NDocumentationMCPServer {
           break;
         }
       }
-      
-      if (!node) {
-        throw new Error(`Node ${nodeType} not found`);
-      }
+    }
+    
+    if (!node) {
+      throw new Error(`Node ${nodeType} not found`);
     }
     
     // Add AI tool capabilities information
@@ -378,36 +956,370 @@ export class N8NDocumentationMCPServer {
         null
     };
     
+    // Process outputs to provide clear mapping
+    let outputs = undefined;
+    if (node.outputNames && node.outputNames.length > 0) {
+      outputs = node.outputNames.map((name: string, index: number) => {
+        // Special handling for loop nodes like SplitInBatches
+        const descriptions = this.getOutputDescriptions(node.nodeType, name, index);
+        return {
+          index,
+          name,
+          description: descriptions.description,
+          connectionGuidance: descriptions.connectionGuidance
+        };
+      });
+    }
+    
     return {
       ...node,
-      aiToolCapabilities
+      workflowNodeType: getWorkflowNodeType(node.package, node.nodeType),
+      aiToolCapabilities,
+      outputs
     };
   }
 
-  private async searchNodes(query: string, limit: number = 20): Promise<any> {
+  private async searchNodes(
+    query: string, 
+    limit: number = 20,
+    options?: { 
+      mode?: 'OR' | 'AND' | 'FUZZY';
+      includeSource?: boolean;
+    }
+  ): Promise<any> {
     await this.ensureInitialized();
     if (!this.db) throw new Error('Database not initialized');
     
+    // Normalize the query if it looks like a full node type
+    let normalizedQuery = query;
+    
+    // Check if query contains node type patterns and normalize them
+    if (query.includes('n8n-nodes-base.') || query.includes('@n8n/n8n-nodes-langchain.')) {
+      normalizedQuery = query
+        .replace(/n8n-nodes-base\./g, 'nodes-base.')
+        .replace(/@n8n\/n8n-nodes-langchain\./g, 'nodes-langchain.');
+    }
+    
+    const searchMode = options?.mode || 'OR';
+    
+    // Check if FTS5 table exists
+    const ftsExists = this.db.prepare(`
+      SELECT name FROM sqlite_master 
+      WHERE type='table' AND name='nodes_fts'
+    `).get();
+    
+    if (ftsExists) {
+      // Use FTS5 search with normalized query
+      return this.searchNodesFTS(normalizedQuery, limit, searchMode);
+    } else {
+      // Fallback to LIKE search with normalized query
+      return this.searchNodesLIKE(normalizedQuery, limit);
+    }
+  }
+  
+  private async searchNodesFTS(query: string, limit: number, mode: 'OR' | 'AND' | 'FUZZY'): Promise<any> {
+    if (!this.db) throw new Error('Database not initialized');
+    
+    // Clean and prepare the query
+    const cleanedQuery = query.trim();
+    if (!cleanedQuery) {
+      return { query, results: [], totalCount: 0 };
+    }
+    
+    // For FUZZY mode, use LIKE search with typo patterns
+    if (mode === 'FUZZY') {
+      return this.searchNodesFuzzy(cleanedQuery, limit);
+    }
+    
+    let ftsQuery: string;
+    
+    // Handle exact phrase searches with quotes
+    if (cleanedQuery.startsWith('"') && cleanedQuery.endsWith('"')) {
+      // Keep exact phrase as is for FTS5
+      ftsQuery = cleanedQuery;
+    } else {
+      // Split into words and handle based on mode
+      const words = cleanedQuery.split(/\s+/).filter(w => w.length > 0);
+      
+      switch (mode) {
+        case 'AND':
+          // All words must be present
+          ftsQuery = words.join(' AND ');
+          break;
+          
+        case 'OR':
+        default:
+          // Any word can match (default)
+          ftsQuery = words.join(' OR ');
+          break;
+      }
+    }
+    
+    try {
+      // Use FTS5 with ranking
+      const nodes = this.db.prepare(`
+        SELECT 
+          n.*,
+          rank
+        FROM nodes n
+        JOIN nodes_fts ON n.rowid = nodes_fts.rowid
+        WHERE nodes_fts MATCH ?
+        ORDER BY 
+          rank,
+          CASE 
+            WHEN n.display_name = ? THEN 0
+            WHEN n.display_name LIKE ? THEN 1
+            WHEN n.node_type LIKE ? THEN 2
+            ELSE 3
+          END,
+          n.display_name
+        LIMIT ?
+      `).all(ftsQuery, cleanedQuery, `%${cleanedQuery}%`, `%${cleanedQuery}%`, limit) as (NodeRow & { rank: number })[];
+      
+      // Apply additional relevance scoring for better results
+      const scoredNodes = nodes.map(node => {
+        const relevanceScore = this.calculateRelevanceScore(node, cleanedQuery);
+        return { ...node, relevanceScore };
+      });
+      
+      // Sort by combined score (FTS rank + relevance score)
+      scoredNodes.sort((a, b) => {
+        // Prioritize exact matches
+        if (a.display_name.toLowerCase() === cleanedQuery.toLowerCase()) return -1;
+        if (b.display_name.toLowerCase() === cleanedQuery.toLowerCase()) return 1;
+        
+        // Then by relevance score
+        if (a.relevanceScore !== b.relevanceScore) {
+          return b.relevanceScore - a.relevanceScore;
+        }
+        
+        // Then by FTS rank
+        return a.rank - b.rank;
+      });
+      
+      // If FTS didn't find key primary nodes, augment with LIKE search
+      const hasHttpRequest = scoredNodes.some(n => n.node_type === 'nodes-base.httpRequest');
+      if (cleanedQuery.toLowerCase().includes('http') && !hasHttpRequest) {
+        // FTS missed HTTP Request, fall back to LIKE search
+        logger.debug('FTS missed HTTP Request node, augmenting with LIKE search');
+        return this.searchNodesLIKE(query, limit);
+      }
+      
+      const result: any = {
+        query,
+        results: scoredNodes.map(node => ({
+          nodeType: node.node_type,
+          workflowNodeType: getWorkflowNodeType(node.package_name, node.node_type),
+          displayName: node.display_name,
+          description: node.description,
+          category: node.category,
+          package: node.package_name,
+          relevance: this.calculateRelevance(node, cleanedQuery)
+        })),
+        totalCount: scoredNodes.length
+      };
+      
+      // Only include mode if it's not the default
+      if (mode !== 'OR') {
+        result.mode = mode;
+      }
+      
+      return result;
+      
+    } catch (error: any) {
+      // If FTS5 query fails, fallback to LIKE search
+      logger.warn('FTS5 search failed, falling back to LIKE search:', error.message);
+      
+      // Special handling for syntax errors
+      if (error.message.includes('syntax error') || error.message.includes('fts5')) {
+        logger.warn(`FTS5 syntax error for query "${query}" in mode ${mode}`);
+        
+        // For problematic queries, use LIKE search with mode info
+        const likeResult = await this.searchNodesLIKE(query, limit);
+        return {
+          ...likeResult,
+          mode
+        };
+      }
+      
+      return this.searchNodesLIKE(query, limit);
+    }
+  }
+  
+  private async searchNodesFuzzy(query: string, limit: number): Promise<any> {
+    if (!this.db) throw new Error('Database not initialized');
+    
+    // Split into words for fuzzy matching
+    const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 0);
+    
+    if (words.length === 0) {
+      return { query, results: [], totalCount: 0, mode: 'FUZZY' };
+    }
+    
+    // For fuzzy search, get ALL nodes to ensure we don't miss potential matches
+    // We'll limit results after scoring
+    const candidateNodes = this.db!.prepare(`
+      SELECT * FROM nodes
+    `).all() as NodeRow[];
+    
+    // Calculate fuzzy scores for candidate nodes
+    const scoredNodes = candidateNodes.map(node => {
+      const score = this.calculateFuzzyScore(node, query);
+      return { node, score };
+    });
+    
+    // Filter and sort by score
+    const matchingNodes = scoredNodes
+      .filter(item => item.score >= 200) // Lower threshold for better typo tolerance
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map(item => item.node);
+    
+    // Debug logging
+    if (matchingNodes.length === 0) {
+      const topScores = scoredNodes
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5);
+      logger.debug(`FUZZY search for "${query}" - no matches above 400. Top scores:`, 
+        topScores.map(s => ({ name: s.node.display_name, score: s.score })));
+    }
+    
+    return {
+      query,
+      mode: 'FUZZY',
+      results: matchingNodes.map(node => ({
+        nodeType: node.node_type,
+        workflowNodeType: getWorkflowNodeType(node.package_name, node.node_type),
+        displayName: node.display_name,
+        description: node.description,
+        category: node.category,
+        package: node.package_name
+      })),
+      totalCount: matchingNodes.length
+    };
+  }
+  
+  private calculateFuzzyScore(node: NodeRow, query: string): number {
+    const queryLower = query.toLowerCase();
+    const displayNameLower = node.display_name.toLowerCase();
+    const nodeTypeLower = node.node_type.toLowerCase();
+    const nodeTypeClean = nodeTypeLower.replace(/^nodes-base\./, '').replace(/^nodes-langchain\./, '');
+    
+    // Exact match gets highest score
+    if (displayNameLower === queryLower || nodeTypeClean === queryLower) {
+      return 1000;
+    }
+    
+    // Calculate edit distances for different parts
+    const nameDistance = this.getEditDistance(queryLower, displayNameLower);
+    const typeDistance = this.getEditDistance(queryLower, nodeTypeClean);
+    
+    // Also check individual words in the display name
+    const nameWords = displayNameLower.split(/\s+/);
+    let minWordDistance = Infinity;
+    for (const word of nameWords) {
+      const distance = this.getEditDistance(queryLower, word);
+      if (distance < minWordDistance) {
+        minWordDistance = distance;
+      }
+    }
+    
+    // Calculate best match score
+    const bestDistance = Math.min(nameDistance, typeDistance, minWordDistance);
+    
+    // Use the length of the matched word for similarity calculation
+    let matchedLen = queryLower.length;
+    if (minWordDistance === bestDistance) {
+      // Find which word matched best
+      for (const word of nameWords) {
+        if (this.getEditDistance(queryLower, word) === minWordDistance) {
+          matchedLen = Math.max(queryLower.length, word.length);
+          break;
+        }
+      }
+    } else if (typeDistance === bestDistance) {
+      matchedLen = Math.max(queryLower.length, nodeTypeClean.length);
+    } else {
+      matchedLen = Math.max(queryLower.length, displayNameLower.length);
+    }
+    
+    const similarity = 1 - (bestDistance / matchedLen);
+    
+    // Boost if query is a substring
+    if (displayNameLower.includes(queryLower) || nodeTypeClean.includes(queryLower)) {
+      return 800 + (similarity * 100);
+    }
+    
+    // Check if it's a prefix match
+    if (displayNameLower.startsWith(queryLower) || 
+        nodeTypeClean.startsWith(queryLower) ||
+        nameWords.some(w => w.startsWith(queryLower))) {
+      return 700 + (similarity * 100);
+    }
+    
+    // Allow up to 1-2 character differences for typos
+    if (bestDistance <= 2) {
+      return 500 + ((2 - bestDistance) * 100) + (similarity * 50);
+    }
+    
+    // Allow up to 3 character differences for longer words
+    if (bestDistance <= 3 && queryLower.length >= 4) {
+      return 400 + ((3 - bestDistance) * 50) + (similarity * 50);
+    }
+    
+    // Base score on similarity
+    return similarity * 300;
+  }
+  
+  private getEditDistance(s1: string, s2: string): number {
+    // Simple Levenshtein distance implementation
+    const m = s1.length;
+    const n = s2.length;
+    const dp: number[][] = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
+    
+    for (let i = 0; i <= m; i++) dp[i][0] = i;
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+    
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        if (s1[i - 1] === s2[j - 1]) {
+          dp[i][j] = dp[i - 1][j - 1];
+        } else {
+          dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+        }
+      }
+    }
+    
+    return dp[m][n];
+  }
+  
+  private async searchNodesLIKE(query: string, limit: number): Promise<any> {
+    if (!this.db) throw new Error('Database not initialized');
+    
+    // This is the existing LIKE-based implementation
     // Handle exact phrase searches with quotes
     if (query.startsWith('"') && query.endsWith('"')) {
       const exactPhrase = query.slice(1, -1);
       const nodes = this.db!.prepare(`
         SELECT * FROM nodes 
         WHERE node_type LIKE ? OR display_name LIKE ? OR description LIKE ?
-        ORDER BY display_name
         LIMIT ?
-      `).all(`%${exactPhrase}%`, `%${exactPhrase}%`, `%${exactPhrase}%`, limit) as NodeRow[];
+      `).all(`%${exactPhrase}%`, `%${exactPhrase}%`, `%${exactPhrase}%`, limit * 3) as NodeRow[];
+      
+      // Apply relevance ranking for exact phrase search
+      const rankedNodes = this.rankSearchResults(nodes, exactPhrase, limit);
       
       return { 
         query, 
-        results: nodes.map(node => ({
+        results: rankedNodes.map(node => ({
           nodeType: node.node_type,
+          workflowNodeType: getWorkflowNodeType(node.package_name, node.node_type),
           displayName: node.display_name,
           description: node.description,
           category: node.category,
           package: node.package_name
         })), 
-        totalCount: nodes.length 
+        totalCount: rankedNodes.length 
       };
     }
     
@@ -424,25 +1336,29 @@ export class N8NDocumentationMCPServer {
     ).join(' OR ');
     
     const params: any[] = words.flatMap(w => [`%${w}%`, `%${w}%`, `%${w}%`]);
-    params.push(limit);
+    // Fetch more results initially to ensure we get the best matches after ranking
+    params.push(limit * 3);
     
     const nodes = this.db!.prepare(`
       SELECT DISTINCT * FROM nodes 
       WHERE ${conditions}
-      ORDER BY display_name
       LIMIT ?
     `).all(...params) as NodeRow[];
     
+    // Apply relevance ranking
+    const rankedNodes = this.rankSearchResults(nodes, query, limit);
+    
     return {
       query,
-      results: nodes.map(node => ({
+      results: rankedNodes.map(node => ({
         nodeType: node.node_type,
+        workflowNodeType: getWorkflowNodeType(node.package_name, node.node_type),
         displayName: node.display_name,
         description: node.description,
         category: node.category,
         package: node.package_name
       })),
-      totalCount: nodes.length
+      totalCount: rankedNodes.length
     };
   }
 
@@ -452,6 +1368,149 @@ export class N8NDocumentationMCPServer {
     if (node.display_name.toLowerCase().includes(lowerQuery)) return 'high';
     if (node.description?.toLowerCase().includes(lowerQuery)) return 'medium';
     return 'low';
+  }
+  
+  private calculateRelevanceScore(node: NodeRow, query: string): number {
+    const query_lower = query.toLowerCase();
+    const name_lower = node.display_name.toLowerCase();
+    const type_lower = node.node_type.toLowerCase();
+    const type_without_prefix = type_lower.replace(/^nodes-base\./, '').replace(/^nodes-langchain\./, '');
+    
+    let score = 0;
+    
+    // Exact match in display name (highest priority)
+    if (name_lower === query_lower) {
+      score = 1000;
+    }
+    // Exact match in node type (without prefix)
+    else if (type_without_prefix === query_lower) {
+      score = 950;
+    }
+    // Special boost for common primary nodes
+    else if (query_lower === 'webhook' && node.node_type === 'nodes-base.webhook') {
+      score = 900;
+    }
+    else if ((query_lower === 'http' || query_lower === 'http request' || query_lower === 'http call') && node.node_type === 'nodes-base.httpRequest') {
+      score = 900;
+    }
+    // Additional boost for multi-word queries matching primary nodes
+    else if (query_lower.includes('http') && query_lower.includes('call') && node.node_type === 'nodes-base.httpRequest') {
+      score = 890;
+    }
+    else if (query_lower.includes('http') && node.node_type === 'nodes-base.httpRequest') {
+      score = 850;
+    }
+    // Boost for webhook queries
+    else if (query_lower.includes('webhook') && node.node_type === 'nodes-base.webhook') {
+      score = 850;
+    }
+    // Display name starts with query
+    else if (name_lower.startsWith(query_lower)) {
+      score = 800;
+    }
+    // Word boundary match in display name
+    else if (new RegExp(`\\b${query_lower}\\b`, 'i').test(node.display_name)) {
+      score = 700;
+    }
+    // Contains in display name
+    else if (name_lower.includes(query_lower)) {
+      score = 600;
+    }
+    // Type contains query (without prefix)
+    else if (type_without_prefix.includes(query_lower)) {
+      score = 500;
+    }
+    // Contains in description
+    else if (node.description?.toLowerCase().includes(query_lower)) {
+      score = 400;
+    }
+    
+    return score;
+  }
+
+  private rankSearchResults(nodes: NodeRow[], query: string, limit: number): NodeRow[] {
+    const query_lower = query.toLowerCase();
+    
+    // Calculate relevance scores for each node
+    const scoredNodes = nodes.map(node => {
+      const name_lower = node.display_name.toLowerCase();
+      const type_lower = node.node_type.toLowerCase();
+      const type_without_prefix = type_lower.replace(/^nodes-base\./, '').replace(/^nodes-langchain\./, '');
+      
+      let score = 0;
+      
+      // Exact match in display name (highest priority)
+      if (name_lower === query_lower) {
+        score = 1000;
+      }
+      // Exact match in node type (without prefix)
+      else if (type_without_prefix === query_lower) {
+        score = 950;
+      }
+      // Special boost for common primary nodes
+      else if (query_lower === 'webhook' && node.node_type === 'nodes-base.webhook') {
+        score = 900;
+      }
+      else if ((query_lower === 'http' || query_lower === 'http request' || query_lower === 'http call') && node.node_type === 'nodes-base.httpRequest') {
+        score = 900;
+      }
+      // Boost for webhook queries
+      else if (query_lower.includes('webhook') && node.node_type === 'nodes-base.webhook') {
+        score = 850;
+      }
+      // Additional boost for http queries
+      else if (query_lower.includes('http') && node.node_type === 'nodes-base.httpRequest') {
+        score = 850;
+      }
+      // Display name starts with query
+      else if (name_lower.startsWith(query_lower)) {
+        score = 800;
+      }
+      // Word boundary match in display name
+      else if (new RegExp(`\\b${query_lower}\\b`, 'i').test(node.display_name)) {
+        score = 700;
+      }
+      // Contains in display name
+      else if (name_lower.includes(query_lower)) {
+        score = 600;
+      }
+      // Type contains query (without prefix)
+      else if (type_without_prefix.includes(query_lower)) {
+        score = 500;
+      }
+      // Contains in description
+      else if (node.description?.toLowerCase().includes(query_lower)) {
+        score = 400;
+      }
+      
+      // For multi-word queries, check if all words are present
+      const words = query_lower.split(/\s+/).filter(w => w.length > 0);
+      if (words.length > 1) {
+        const allWordsInName = words.every(word => name_lower.includes(word));
+        const allWordsInDesc = words.every(word => node.description?.toLowerCase().includes(word));
+        
+        if (allWordsInName) score += 200;
+        else if (allWordsInDesc) score += 100;
+        
+        // Special handling for common multi-word queries
+        if (query_lower === 'http call' && name_lower === 'http request') {
+          score = 920; // Boost HTTP Request for "http call" query
+        }
+      }
+      
+      return { node, score };
+    });
+    
+    // Sort by score (descending) and then by display name (ascending)
+    scoredNodes.sort((a, b) => {
+      if (a.score !== b.score) {
+        return b.score - a.score;
+      }
+      return a.node.display_name.localeCompare(b.node.display_name);
+    });
+    
+    // Return only the requested number of results
+    return scoredNodes.slice(0, limit).map(item => item.node);
   }
 
   private async listAITools(): Promise<any> {
@@ -489,11 +1548,38 @@ export class N8NDocumentationMCPServer {
   private async getNodeDocumentation(nodeType: string): Promise<any> {
     await this.ensureInitialized();
     if (!this.db) throw new Error('Database not initialized');
-    const node = this.db!.prepare(`
+    
+    // First try with normalized type
+    const normalizedType = normalizeNodeType(nodeType);
+    let node = this.db!.prepare(`
       SELECT node_type, display_name, documentation, description 
       FROM nodes 
       WHERE node_type = ?
-    `).get(nodeType) as NodeRow | undefined;
+    `).get(normalizedType) as NodeRow | undefined;
+    
+    // If not found and normalization changed the type, try original
+    if (!node && normalizedType !== nodeType) {
+      node = this.db!.prepare(`
+        SELECT node_type, display_name, documentation, description 
+        FROM nodes 
+        WHERE node_type = ?
+      `).get(nodeType) as NodeRow | undefined;
+    }
+    
+    // If still not found, try alternatives
+    if (!node) {
+      const alternatives = getNodeTypeAlternatives(normalizedType);
+      
+      for (const alt of alternatives) {
+        node = this.db!.prepare(`
+          SELECT node_type, display_name, documentation, description 
+          FROM nodes 
+          WHERE node_type = ?
+        `).get(alt) as NodeRow | undefined;
+        
+        if (node) break;
+      }
+    }
     
     if (!node) {
       throw new Error(`Node ${nodeType} not found`);
@@ -553,8 +1639,19 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
       GROUP BY package_name
     `).all() as any[];
     
+    // Get template statistics
+    const templateStats = this.db!.prepare(`
+      SELECT 
+        COUNT(*) as total_templates,
+        AVG(views) as avg_views,
+        MIN(views) as min_views,
+        MAX(views) as max_views
+      FROM templates
+    `).get() as any;
+    
     return {
       totalNodes: stats.total,
+      totalTemplates: templateStats.total_templates || 0,
       statistics: {
         aiTools: stats.ai_tools,
         triggers: stats.triggers,
@@ -563,6 +1660,12 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         documentationCoverage: Math.round((stats.with_docs / stats.total) * 100) + '%',
         uniquePackages: stats.packages,
         uniqueCategories: stats.categories,
+        templates: {
+          total: templateStats.total_templates || 0,
+          avgViews: Math.round(templateStats.avg_views || 0),
+          minViews: templateStats.min_views || 0,
+          maxViews: templateStats.max_views || 0
+        }
       },
       packageBreakdown: packages.map(pkg => ({
         package: pkg.package_name,
@@ -581,16 +1684,18 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     if (cached) return cached;
     
     // Get the full node information
-    let node = this.repository.getNode(nodeType);
+    // First try with normalized type
+    const normalizedType = normalizeNodeType(nodeType);
+    let node = this.repository.getNode(normalizedType);
+    
+    if (!node && normalizedType !== nodeType) {
+      // Try original if normalization changed it
+      node = this.repository.getNode(nodeType);
+    }
     
     if (!node) {
-      // Try alternative formats
-      const alternatives = [
-        nodeType,
-        nodeType.replace('n8n-nodes-base.', ''),
-        `n8n-nodes-base.${nodeType}`,
-        nodeType.toLowerCase()
-      ];
+      // Fallback to other alternatives for edge cases
+      const alternatives = getNodeTypeAlternatives(normalizedType);
       
       for (const alt of alternatives) {
         const found = this.repository!.getNode(alt);
@@ -599,10 +1704,10 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
           break;
         }
       }
-      
-      if (!node) {
-        throw new Error(`Node ${nodeType} not found`);
-      }
+    }
+    
+    if (!node) {
+      throw new Error(`Node ${nodeType} not found`);
     }
     
     // Get properties (already parsed by repository)
@@ -611,14 +1716,12 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     // Get essential properties
     const essentials = PropertyFilter.getEssentials(allProperties, node.nodeType);
     
-    // Generate examples
-    const examples = ExampleGenerator.getExamples(node.nodeType, essentials);
-    
     // Get operations (already parsed by repository)
     const operations = node.operations || [];
     
     const result = {
       nodeType: node.nodeType,
+      workflowNodeType: getWorkflowNodeType(node.package, node.nodeType),
       displayName: node.displayName,
       description: node.description,
       category: node.category,
@@ -632,7 +1735,7 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         action: op.action,
         resource: op.resource
       })),
-      examples,
+      // Examples removed - use validate_node_operation for working configurations
       metadata: {
         totalProperties: allProperties.length,
         isAITool: node.isAITool,
@@ -655,16 +1758,18 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     if (!this.repository) throw new Error('Repository not initialized');
     
     // Get the node
-    let node = this.repository.getNode(nodeType);
+    // First try with normalized type
+    const normalizedType = normalizeNodeType(nodeType);
+    let node = this.repository.getNode(normalizedType);
+    
+    if (!node && normalizedType !== nodeType) {
+      // Try original if normalization changed it
+      node = this.repository.getNode(nodeType);
+    }
     
     if (!node) {
-      // Try alternative formats
-      const alternatives = [
-        nodeType,
-        nodeType.replace('n8n-nodes-base.', ''),
-        `n8n-nodes-base.${nodeType}`,
-        nodeType.toLowerCase()
-      ];
+      // Fallback to other alternatives for edge cases
+      const alternatives = getNodeTypeAlternatives(normalizedType);
       
       for (const alt of alternatives) {
         const found = this.repository!.getNode(alt);
@@ -673,10 +1778,10 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
           break;
         }
       }
-      
-      if (!node) {
-        throw new Error(`Node ${nodeType} not found`);
-      }
+    }
+    
+    if (!node) {
+      throw new Error(`Node ${nodeType} not found`);
     }
     
     // Get properties and search (already parsed by repository)
@@ -811,16 +1916,18 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     if (!this.repository) throw new Error('Repository not initialized');
     
     // Get node info to access properties
-    let node = this.repository.getNode(nodeType);
+    // First try with normalized type
+    const normalizedType = normalizeNodeType(nodeType);
+    let node = this.repository.getNode(normalizedType);
+    
+    if (!node && normalizedType !== nodeType) {
+      // Try original if normalization changed it
+      node = this.repository.getNode(nodeType);
+    }
     
     if (!node) {
-      // Try alternative formats
-      const alternatives = [
-        nodeType,
-        nodeType.replace('n8n-nodes-base.', ''),
-        `n8n-nodes-base.${nodeType}`,
-        nodeType.toLowerCase()
-      ];
+      // Fallback to other alternatives for edge cases
+      const alternatives = getNodeTypeAlternatives(normalizedType);
       
       for (const alt of alternatives) {
         const found = this.repository!.getNode(alt);
@@ -829,10 +1936,10 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
           break;
         }
       }
-      
-      if (!node) {
-        throw new Error(`Node ${nodeType} not found`);
-      }
+    }
+    
+    if (!node) {
+      throw new Error(`Node ${nodeType} not found`);
     }
     
     // Get properties
@@ -850,6 +1957,7 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     // Add node context to result
     return {
       nodeType: node.nodeType,
+      workflowNodeType: getWorkflowNodeType(node.package, node.nodeType),
       displayName: node.displayName,
       ...validationResult,
       summary: {
@@ -866,16 +1974,18 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     if (!this.repository) throw new Error('Repository not initialized');
     
     // Get node info to access properties
-    let node = this.repository.getNode(nodeType);
+    // First try with normalized type
+    const normalizedType = normalizeNodeType(nodeType);
+    let node = this.repository.getNode(normalizedType);
+    
+    if (!node && normalizedType !== nodeType) {
+      // Try original if normalization changed it
+      node = this.repository.getNode(nodeType);
+    }
     
     if (!node) {
-      // Try alternative formats
-      const alternatives = [
-        nodeType,
-        nodeType.replace('n8n-nodes-base.', ''),
-        `n8n-nodes-base.${nodeType}`,
-        nodeType.toLowerCase()
-      ];
+      // Fallback to other alternatives for edge cases
+      const alternatives = getNodeTypeAlternatives(normalizedType);
       
       for (const alt of alternatives) {
         const found = this.repository!.getNode(alt);
@@ -884,10 +1994,10 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
           break;
         }
       }
-      
-      if (!node) {
-        throw new Error(`Node ${nodeType} not found`);
-      }
+    }
+    
+    if (!node) {
+      throw new Error(`Node ${nodeType} not found`);
     }
     
     // Get properties
@@ -918,16 +2028,18 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     if (!this.repository) throw new Error('Repository not initialized');
     
     // Get node info
-    let node = this.repository.getNode(nodeType);
+    // First try with normalized type
+    const normalizedType = normalizeNodeType(nodeType);
+    let node = this.repository.getNode(normalizedType);
+    
+    if (!node && normalizedType !== nodeType) {
+      // Try original if normalization changed it
+      node = this.repository.getNode(nodeType);
+    }
     
     if (!node) {
-      // Try alternative formats
-      const alternatives = [
-        nodeType,
-        nodeType.replace('n8n-nodes-base.', ''),
-        `n8n-nodes-base.${nodeType}`,
-        nodeType.toLowerCase()
-      ];
+      // Fallback to other alternatives for edge cases
+      const alternatives = getNodeTypeAlternatives(normalizedType);
       
       for (const alt of alternatives) {
         const found = this.repository!.getNode(alt);
@@ -936,10 +2048,10 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
           break;
         }
       }
-      
-      if (!node) {
-        throw new Error(`Node ${nodeType} not found`);
-      }
+    }
+    
+    if (!node) {
+      throw new Error(`Node ${nodeType} not found`);
     }
     
     // Determine common AI tool use cases based on node type
@@ -971,6 +2083,7 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     
     return {
       nodeType: node.nodeType,
+      workflowNodeType: getWorkflowNodeType(node.package, node.nodeType),
       displayName: node.displayName,
       description: node.description,
       package: node.package,
@@ -979,6 +2092,52 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     };
   }
   
+  private getOutputDescriptions(nodeType: string, outputName: string, index: number): { description: string, connectionGuidance: string } {
+    // Special handling for loop nodes
+    if (nodeType === 'nodes-base.splitInBatches') {
+      if (outputName === 'done' && index === 0) {
+        return {
+          description: 'Final processed data after all iterations complete',
+          connectionGuidance: 'Connect to nodes that should run AFTER the loop completes'
+        };
+      } else if (outputName === 'loop' && index === 1) {
+        return {
+          description: 'Current batch data for this iteration',
+          connectionGuidance: 'Connect to nodes that process items INSIDE the loop (and connect their output back to this node)'
+        };
+      }
+    }
+    
+    // Special handling for IF node
+    if (nodeType === 'nodes-base.if') {
+      if (outputName === 'true' && index === 0) {
+        return {
+          description: 'Items that match the condition',
+          connectionGuidance: 'Connect to nodes that handle the TRUE case'
+        };
+      } else if (outputName === 'false' && index === 1) {
+        return {
+          description: 'Items that do not match the condition',
+          connectionGuidance: 'Connect to nodes that handle the FALSE case'
+        };
+      }
+    }
+    
+    // Special handling for Switch node
+    if (nodeType === 'nodes-base.switch') {
+      return {
+        description: `Output ${index}: ${outputName || 'Route ' + index}`,
+        connectionGuidance: `Connect to nodes for the "${outputName || 'route ' + index}" case`
+      };
+    }
+    
+    // Default handling
+    return {
+      description: outputName || `Output ${index}`,
+      connectionGuidance: `Connect to downstream nodes`
+    };
+  }
+
   private getCommonAIToolUseCases(nodeType: string): string[] {
     const useCaseMap: Record<string, string[]> = {
       'nodes-base.slack': [
@@ -1092,16 +2251,18 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     if (!this.repository) throw new Error('Repository not initialized');
     
     // Get node info
-    let node = this.repository.getNode(nodeType);
+    // First try with normalized type
+    const normalizedType = normalizeNodeType(nodeType);
+    let node = this.repository.getNode(normalizedType);
+    
+    if (!node && normalizedType !== nodeType) {
+      // Try original if normalization changed it
+      node = this.repository.getNode(nodeType);
+    }
     
     if (!node) {
-      // Try alternative formats
-      const alternatives = [
-        nodeType,
-        nodeType.replace('n8n-nodes-base.', ''),
-        `n8n-nodes-base.${nodeType}`,
-        nodeType.toLowerCase()
-      ];
+      // Fallback to other alternatives for edge cases
+      const alternatives = getNodeTypeAlternatives(normalizedType);
       
       for (const alt of alternatives) {
         const found = this.repository!.getNode(alt);
@@ -1110,21 +2271,21 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
           break;
         }
       }
-      
-      if (!node) {
-        throw new Error(`Node ${nodeType} not found`);
-      }
+    }
+    
+    if (!node) {
+      throw new Error(`Node ${nodeType} not found`);
     }
     
     // Get properties  
     const properties = node.properties || [];
     
-    // Extract operation context
+    // Extract operation context (safely handle undefined config properties)
     const operationContext = {
-      resource: config.resource,
-      operation: config.operation,
-      action: config.action,
-      mode: config.mode
+      resource: config?.resource,
+      operation: config?.operation,
+      action: config?.action,
+      mode: config?.mode
     };
     
     // Find missing required fields
@@ -1141,7 +2302,7 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         // Check show conditions
         if (prop.displayOptions.show) {
           for (const [key, values] of Object.entries(prop.displayOptions.show)) {
-            const configValue = config[key];
+            const configValue = config?.[key];
             const expectedValues = Array.isArray(values) ? values : [values];
             
             if (!expectedValues.includes(configValue)) {
@@ -1154,7 +2315,7 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         // Check hide conditions
         if (isVisible && prop.displayOptions.hide) {
           for (const [key, values] of Object.entries(prop.displayOptions.hide)) {
-            const configValue = config[key];
+            const configValue = config?.[key];
             const expectedValues = Array.isArray(values) ? values : [values];
             
             if (expectedValues.includes(configValue)) {
@@ -1167,8 +2328,8 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         if (!isVisible) continue;
       }
       
-      // Check if field is missing
-      if (!(prop.name in config)) {
+      // Check if field is missing (safely handle null/undefined config)
+      if (!config || !(prop.name in config)) {
         missingFields.push(prop.displayName || prop.name);
       }
     }
@@ -1201,76 +2362,95 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
   }
   
   // Template-related methods
-  private async listNodeTemplates(nodeTypes: string[], limit: number = 10): Promise<any> {
+  private async listTemplates(limit: number = 10, offset: number = 0, sortBy: 'views' | 'created_at' | 'name' = 'views', includeMetadata: boolean = false): Promise<any> {
     await this.ensureInitialized();
     if (!this.templateService) throw new Error('Template service not initialized');
     
-    const templates = await this.templateService.listNodeTemplates(nodeTypes, limit);
+    const result = await this.templateService.listTemplates(limit, offset, sortBy, includeMetadata);
     
-    if (templates.length === 0) {
+    return {
+      ...result,
+      tip: result.items.length > 0 ? 
+        `Use get_template(templateId) to get full workflow details. Total: ${result.total} templates available.` :
+        "No templates found. Run 'npm run fetch:templates' to update template database"
+    };
+  }
+  
+  private async listNodeTemplates(nodeTypes: string[], limit: number = 10, offset: number = 0): Promise<any> {
+    await this.ensureInitialized();
+    if (!this.templateService) throw new Error('Template service not initialized');
+    
+    const result = await this.templateService.listNodeTemplates(nodeTypes, limit, offset);
+    
+    if (result.items.length === 0 && offset === 0) {
       return {
+        ...result,
         message: `No templates found using nodes: ${nodeTypes.join(', ')}`,
-        tip: "Try searching with more common nodes or run 'npm run fetch:templates' to update template database",
-        templates: []
+        tip: "Try searching with more common nodes or run 'npm run fetch:templates' to update template database"
       };
     }
     
     return {
-      templates,
-      count: templates.length,
-      tip: `Use get_template(templateId) to get the full workflow JSON for any template`
+      ...result,
+      tip: `Showing ${result.items.length} of ${result.total} templates. Use offset for pagination.`
     };
   }
   
-  private async getTemplate(templateId: number): Promise<any> {
+  private async getTemplate(templateId: number, mode: 'nodes_only' | 'structure' | 'full' = 'full'): Promise<any> {
     await this.ensureInitialized();
     if (!this.templateService) throw new Error('Template service not initialized');
     
-    const template = await this.templateService.getTemplate(templateId);
+    const template = await this.templateService.getTemplate(templateId, mode);
     
     if (!template) {
       return {
         error: `Template ${templateId} not found`,
-        tip: "Use list_node_templates or search_templates to find available templates"
+        tip: "Use list_templates, list_node_templates or search_templates to find available templates"
       };
     }
     
+    const usage = mode === 'nodes_only' ? "Node list for quick overview" :
+                  mode === 'structure' ? "Workflow structure without full details" :
+                  "Complete workflow JSON ready to import into n8n";
+    
     return {
+      mode,
       template,
-      usage: "Import this workflow JSON directly into n8n or use it as a reference for building workflows"
+      usage
     };
   }
   
-  private async searchTemplates(query: string, limit: number = 20): Promise<any> {
+  private async searchTemplates(query: string, limit: number = 20, offset: number = 0, fields?: string[]): Promise<any> {
     await this.ensureInitialized();
     if (!this.templateService) throw new Error('Template service not initialized');
     
-    const templates = await this.templateService.searchTemplates(query, limit);
+    const result = await this.templateService.searchTemplates(query, limit, offset, fields);
     
-    if (templates.length === 0) {
+    if (result.items.length === 0 && offset === 0) {
       return {
+        ...result,
         message: `No templates found matching: "${query}"`,
-        tip: "Try different keywords or run 'npm run fetch:templates' to update template database",
-        templates: []
+        tip: "Try different keywords or run 'npm run fetch:templates' to update template database"
       };
     }
     
     return {
-      templates,
-      count: templates.length,
-      query
+      ...result,
+      query,
+      tip: `Found ${result.total} templates matching "${query}". Showing ${result.items.length}.`
     };
   }
   
-  private async getTemplatesForTask(task: string): Promise<any> {
+  private async getTemplatesForTask(task: string, limit: number = 10, offset: number = 0): Promise<any> {
     await this.ensureInitialized();
     if (!this.templateService) throw new Error('Template service not initialized');
     
-    const templates = await this.templateService.getTemplatesForTask(task);
+    const result = await this.templateService.getTemplatesForTask(task, limit, offset);
     const availableTasks = this.templateService.listAvailableTasks();
     
-    if (templates.length === 0) {
+    if (result.items.length === 0 && offset === 0) {
       return {
+        ...result,
         message: `No templates found for task: ${task}`,
         availableTasks,
         tip: "Try a different task or use search_templates for custom searches"
@@ -1278,10 +2458,54 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     }
     
     return {
+      ...result,
       task,
-      templates,
-      count: templates.length,
-      description: this.getTaskDescription(task)
+      description: this.getTaskDescription(task),
+      tip: `${result.total} templates available for ${task}. Showing ${result.items.length}.`
+    };
+  }
+  
+  private async searchTemplatesByMetadata(filters: {
+    category?: string;
+    complexity?: 'simple' | 'medium' | 'complex';
+    maxSetupMinutes?: number;
+    minSetupMinutes?: number;
+    requiredService?: string;
+    targetAudience?: string;
+  }, limit: number = 20, offset: number = 0): Promise<any> {
+    await this.ensureInitialized();
+    if (!this.templateService) throw new Error('Template service not initialized');
+    
+    const result = await this.templateService.searchTemplatesByMetadata(filters, limit, offset);
+    
+    // Build filter summary for feedback
+    const filterSummary: string[] = [];
+    if (filters.category) filterSummary.push(`category: ${filters.category}`);
+    if (filters.complexity) filterSummary.push(`complexity: ${filters.complexity}`);
+    if (filters.maxSetupMinutes) filterSummary.push(`max setup: ${filters.maxSetupMinutes} min`);
+    if (filters.minSetupMinutes) filterSummary.push(`min setup: ${filters.minSetupMinutes} min`);
+    if (filters.requiredService) filterSummary.push(`service: ${filters.requiredService}`);
+    if (filters.targetAudience) filterSummary.push(`audience: ${filters.targetAudience}`);
+    
+    if (result.items.length === 0 && offset === 0) {
+      // Get available categories and audiences for suggestions
+      const availableCategories = await this.templateService.getAvailableCategories();
+      const availableAudiences = await this.templateService.getAvailableTargetAudiences();
+      
+      return {
+        ...result,
+        message: `No templates found with filters: ${filterSummary.join(', ')}`,
+        availableCategories: availableCategories.slice(0, 10),
+        availableAudiences: availableAudiences.slice(0, 5),
+        tip: "Try broader filters or different categories. Use list_templates to see all templates."
+      };
+    }
+    
+    return {
+      ...result,
+      filters,
+      filterSummary: filterSummary.join(', '),
+      tip: `Found ${result.total} templates matching filters. Showing ${result.items.length}. Each includes AI-generated metadata.`
     };
   }
   
@@ -1305,6 +2529,56 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
   private async validateWorkflow(workflow: any, options?: any): Promise<any> {
     await this.ensureInitialized();
     if (!this.repository) throw new Error('Repository not initialized');
+    
+    // Enhanced logging for workflow validation
+    logger.info('Workflow validation requested', {
+      hasWorkflow: !!workflow,
+      workflowType: typeof workflow,
+      hasNodes: workflow?.nodes !== undefined,
+      nodesType: workflow?.nodes ? typeof workflow.nodes : 'undefined',
+      nodesIsArray: Array.isArray(workflow?.nodes),
+      nodesCount: Array.isArray(workflow?.nodes) ? workflow.nodes.length : 0,
+      hasConnections: workflow?.connections !== undefined,
+      connectionsType: workflow?.connections ? typeof workflow.connections : 'undefined',
+      options: options
+    });
+    
+    // Help n8n AI agents with common mistakes
+    if (!workflow || typeof workflow !== 'object') {
+      return {
+        valid: false,
+        errors: [{
+          node: 'workflow',
+          message: 'Workflow must be an object with nodes and connections',
+          details: 'Expected format: ' + getWorkflowExampleString()
+        }],
+        summary: { errorCount: 1 }
+      };
+    }
+    
+    if (!workflow.nodes || !Array.isArray(workflow.nodes)) {
+      return {
+        valid: false,
+        errors: [{
+          node: 'workflow',
+          message: 'Workflow must have a nodes array',
+          details: 'Expected: workflow.nodes = [array of node objects]. ' + getWorkflowExampleString()
+        }],
+        summary: { errorCount: 1 }
+      };
+    }
+    
+    if (!workflow.connections || typeof workflow.connections !== 'object') {
+      return {
+        valid: false,
+        errors: [{
+          node: 'workflow',
+          message: 'Workflow must have a connections object',
+          details: 'Expected: workflow.connections = {} (can be empty object). ' + getWorkflowExampleString()
+        }],
+        summary: { errorCount: 1 }
+      };
+    }
     
     // Create workflow validator instance
     const validator = new WorkflowValidator(
@@ -1523,5 +2797,29 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     
     // Keep the process alive and listening
     process.stdin.resume();
+  }
+  
+  async shutdown(): Promise<void> {
+    logger.info('Shutting down MCP server...');
+    
+    // Clean up cache timers to prevent memory leaks
+    if (this.cache) {
+      try {
+        this.cache.destroy();
+        logger.info('Cache timers cleaned up');
+      } catch (error) {
+        logger.error('Error cleaning up cache:', error);
+      }
+    }
+    
+    // Close database connection if it exists
+    if (this.db) {
+      try {
+        await this.db.close();
+        logger.info('Database connection closed');
+      } catch (error) {
+        logger.error('Error closing database:', error);
+      }
+    }
   }
 }

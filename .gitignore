@@ -39,6 +39,26 @@ logs/
 # Testing
 coverage/
 .nyc_output/
+test-results/
+test-reports/
+test-summary.md
+test-metadata.json
+benchmark-results.json
+benchmark-results*.json
+benchmark-summary.json
+coverage-report.json
+benchmark-comparison.md
+benchmark-comparison.json
+benchmark-current.json
+benchmark-baseline.json
+tests/data/*.db
+tests/fixtures/*.tmp
+tests/test-results/
+.test-dbs/
+junit.xml
+*.test.db
+test-*.db
+.vitest/
 
 # TypeScript
 *.tsbuildinfo
@@ -70,10 +90,13 @@ temp/
 tmp/
 
 # Database files
-data/*.db
+# Database files - nodes.db is now tracked directly
+# data/*.db
 data/*.db-journal
 data/*.db.bak
+data/*.db.backup
 !data/.gitkeep
+!data/nodes.db
 
 # Claude Desktop configs (personal)
 claude_desktop_config.json
@@ -88,3 +111,22 @@ rebuild-v20.sh
 # n8n-docs repo (cloned locally)
 ../n8n-docs/
 n8n-docs/
+
+# npm publish temporary directory
+npm-publish-temp/
+
+# Test files and logs
+test-npx/
+mcp-server-*.log
+server.log
+server-fixed.log
+mcp-debug.log
+
+# Temporary wrapper scripts
+n8n-mcp-wrapper.sh
+
+# Package tarballs
+*.tgz
+
+# MCP configuration files
+.mcp.json
