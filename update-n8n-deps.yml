@@ -24,6 +24,12 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
+
+    # Evita el segfault de better-sqlite3 en CI y da más memoria a Node
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
+      SQL_BACKEND: sqljs
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,10 +38,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
+          cache: npm
 
-      - name: Install deps (ci)
-        run: npm ci
+      - name: Install deps (ci) without optional native modules
+        run: npm ci --no-optional
 
       - name: Dry-run check (qué hay que actualizar)
         run: npm run update:n8n:check
