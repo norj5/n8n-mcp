@@ -1,0 +1,77 @@
+name: Update n8n Dependencies
+
+on:
+  schedule:
+    # Miércoles 10:00 UTC (ajústalo si quieres)
+    - cron: '0 10 * * 3'
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Saltar tests/validación (más rápido, menos seguro)'
+        required: false
+        type: boolean
+        default: false
+      auto_merge:
+        description: 'Auto-merge si pasan los checks'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install deps (ci)
+        run: npm ci
+
+      - name: Dry-run check (qué hay que actualizar)
+        run: npm run update:n8n:check
+
+      - name: Apply updates
+        run: |
+          if [ "${{ inputs.skip_tests }}" = "true" ]; then
+            node scripts/update-n8n-deps.js --skip-tests
+          else
+            npm run update:n8n
+          fi
+
+      - name: Build & validate (solo si no se saltó)
+        if: ${{ inputs.skip_tests != true }}
+        run: |
+          npm run build
+          npm run rebuild
+          npm run validate
+
+      - name: Create PR
+        id: cpr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: chore/update-n8n-deps
+          commit-message: 'chore: update n8n deps & nodes database'
+          title: 'chore: update n8n dependencies'
+          body: |
+            Automated dependency update for n8n/n8n-core/n8n-workflow/@n8n/n8n-nodes-langchain.
+            Includes nodes DB rebuild and validation logs in workflow run.
+          labels: dependencies
+          delete-branch: true
+          draft: false
+
+      - name: Enable auto-merge (optional)
+        if: ${{ inputs.auto_merge == true && steps.cpr.outputs['pull-request-number'] }}
+        uses: peter-evans/enable-pull-request-automerge@v3
+        with:
+          pull-request-number: ${{ steps.cpr.outputs['pull-request-number'] }}
+          merge-method: squash
