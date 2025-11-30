@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1758541290001,
+  "lastUpdate": 1764526491750,
   "repoUrl": "https://github.com/norj5/n8n-mcp",
   "entries": {
     "n8n-mcp Benchmarks": [
@@ -52,6 +52,37 @@ window.BENCHMARK_DATA = {
             "range": "0.3201",
             "unit": "ms",
             "extra": "15104 ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "65113801+norj5@users.noreply.github.com",
+            "name": "norj5",
+            "username": "norj5"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6739e3046c4aabfeaba3a59e5f307c5b69d7fd81",
+          "message": "Merge branch 'czlonkowski:main' into main",
+          "timestamp": "2025-11-30T19:13:01+01:00",
+          "tree_id": "eaab9808188c62b4ece398fe61a63a5cb438a074",
+          "url": "https://github.com/norj5/n8n-mcp/commit/6739e3046c4aabfeaba3a59e5f307c5b69d7fd81"
+        },
+        "date": 1764526491347,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "sample - array sorting - small",
+            "value": 0.0136,
+            "range": "0.3096",
+            "unit": "ms",
+            "extra": "73341 ops/sec"
           }
         ]
       }
